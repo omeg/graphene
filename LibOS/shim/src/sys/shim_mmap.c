@@ -203,6 +203,52 @@ int shim_do_munmap(void* addr, size_t length) {
     return 0;
 }
 
+int shim_do_msync(void* addr, size_t length, int flags) {
+    /*
+     * addr and length specify which portion of the file to update,
+     * but we update everything.
+     */
+    debug("> shim_do_msync: %p [%lu] 0x%x\n", addr, length, flags);
+    if (!addr || !IS_PAGE_ALIGNED_PTR(addr))
+        return -EINVAL;
+
+    if (!length || !access_ok(addr, length))
+        return -EINVAL;
+/*
+    if (!IS_PAGE_ALIGNED(length))
+        length = PAGE_ALIGN_UP(length);
+*/
+    struct shim_vma_val vma;
+
+    if (lookup_overlap_vma(addr, length, &vma) < 0) {
+        debug("can't find addr %p - %p in map, quit msync\n", addr, addr + length);
+        return -ENOMEM; /* not mapped */
+    }
+
+    struct shim_handle* hdl = vma.file;
+
+    if (!hdl)
+        return -ENOMEM; /* not mapped */
+
+    int ret = -ENOMEM;
+    struct shim_mount* fs = hdl->fs;
+
+    if (!fs || !fs->fs_ops)
+        goto out;
+
+    if (!fs->fs_ops->flush) {
+        ret = -ENOSYS;
+        goto out;
+    }
+
+    ret = fs->fs_ops->flush(hdl);
+out:
+    /* lookup_overlap_vma() calls __dump_vma() which adds a reference to file */
+    put_handle(hdl);
+    debug("< shim_do_msync: %p [%lu] 0x%x\n", addr, length, flags);
+    return ret;
+}
+
 /* This emulation of mincore() always tells that pages are _NOT_ in RAM
  * pessimistically due to lack of a good way to know it.
  * Possibly it may cause performance(or other) issue due to this lying.

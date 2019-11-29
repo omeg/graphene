@@ -243,6 +243,32 @@ static int64_t file_read(PAL_HANDLE handle, uint64_t offset, uint64_t count, voi
     return end - offset;
 }
 
+/* write data to matching map buffer(s) */
+static void pf_map_write(struct protected_file* pf, uint64_t offset, uint64_t count,
+                         const void* buf) {
+    struct pf_map* map;
+    struct pf_map* tmp;
+
+    LISTP_FOR_EACH_ENTRY_SAFE(map, tmp, &g_pf_map_list, list) {
+        if (map->pf != pf)
+            continue;
+        size_t size = map->size;
+
+        if (offset >= map->offset) {
+            SGX_DBG(DBG_D, "pf_map_write(%p, %lu, %lu): map %p, size %lu, offset %lu\n",
+                pf, offset, count, map->buffer, size, map->offset);
+            if (count + offset > size + map->offset)
+                count = size + map->offset - offset;
+
+            uint64_t ofs_in_pfa = offset - map->offset;
+            SGX_DBG(DBG_D, "pf_map_write: corrected count %lu, ofs %lu\n", count, ofs_in_pfa);
+
+            if (count > 0) {
+                memcpy(map->buffer + ofs_in_pfa, buf, count);
+            }
+        }
+    }
+}
 
 static int64_t pf_file_write(struct protected_file* pf, PAL_HANDLE handle, uint64_t offset,
                              uint64_t count, const void* buffer) {
@@ -259,6 +285,9 @@ static int64_t pf_file_write(struct protected_file* pf, PAL_HANDLE handle, uint6
         SGX_DBG(DBG_E, "file_write(PF fd %d): pf_write failed: %d\n", fd, pf_ret);
         return -PAL_ERROR_DENIED;
     }
+
+    /* update any matching map buffers */
+    pf_map_write(pf, offset, count, buffer);
 
     return count;
 }
@@ -349,10 +378,6 @@ static int file_delete(PAL_HANDLE handle, int access) {
 static int pf_file_map(struct protected_file* pf, PAL_HANDLE handle, void** addr, int prot,
                        uint64_t offset, uint64_t size) {
     int fd = handle->file.fd;
-    if ((prot & PAL_PROT_READ) && (prot & PAL_PROT_WRITE)) {
-        SGX_DBG(DBG_E, "file_map(PF fd %d): trying to map with R+W access\n", fd);
-        return -PAL_ERROR_NOTSUPPORT;
-    }
 
     if (!pf->context) {
         SGX_DBG(DBG_E, "file_map(PF fd %d): PF not initialized\n", fd);
@@ -384,21 +409,24 @@ static int pf_file_map(struct protected_file* pf, PAL_HANDLE handle, void** addr
 
     if (prot & PAL_PROT_READ) {
         /* we don't check this on writes since file size may be extended then */
-        if (offset >= pf_size) {
+        if (offset >= pf_size && !(prot & PAL_PROT_WRITE)) {
             SGX_DBG(DBG_E, "file_map(PF fd %d): offset (%lu) >= file size (%lu)\n",
                 fd, offset, pf_size);
             return -PAL_ERROR_INVAL;
         }
 
         memset(*addr, 0, size);
-        uint64_t copy_size = size;
-        if (size > pf_size - offset)
+        int64_t copy_size = size;
+        if (offset + size > pf_size)
             copy_size = pf_size - offset;
 
-        pf_status_t pf_ret = pf_read(pf->context, offset, copy_size, *addr);
-        if (PF_FAILURE(pf_ret)) {
-            SGX_DBG(DBG_E, "file_map(PF fd %d): pf_read failed: %d\n", fd, pf_ret);
-            return -PAL_ERROR_DENIED;
+        /* mmap can be called with area beyond the current file data. Only copy what we can. */
+        if (copy_size > 0) {
+            pf_status_t pf_ret = pf_read(pf->context, offset, copy_size, *addr);
+            if (PF_FAILURE(pf_ret)) {
+                SGX_DBG(DBG_E, "file_map(PF fd %d): pf_read failed: %d\n", fd, pf_ret);
+                return -PAL_ERROR_DENIED;
+            }
         }
     }
 
@@ -409,6 +437,9 @@ static int pf_file_map(struct protected_file* pf, PAL_HANDLE handle, void** addr
 /* 'map' operation for file stream. */
 static int file_map(PAL_HANDLE handle, void** addr, int prot, uint64_t offset, uint64_t size) {
     struct protected_file* pf = find_protected_file_handle(handle);
+
+    if (size == 0)
+        return -PAL_ERROR_INVAL;
 
     if (pf)
         return pf_file_map(pf, handle, addr, prot, offset, size);
@@ -508,8 +539,15 @@ static int64_t file_setlength(PAL_HANDLE handle, uint64_t length) {
     return (int64_t)length;
 }
 
+static int pf_file_flush(struct protected_file* pf) {
+    return flush_pf_maps(pf, NULL, false);
+}
+
 /* 'flush' operation for file stream. */
 static int file_flush(PAL_HANDLE handle) {
+    struct protected_file *pf = find_protected_file_handle(handle);
+    if (pf)
+        return pf_file_flush(pf);
     ocall_fsync(handle->file.fd);
     return 0;
 }

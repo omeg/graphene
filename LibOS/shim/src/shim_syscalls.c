@@ -209,7 +209,8 @@ DEFINE_SHIM_SYSCALL(sched_yield, 0, shim_do_sched_yield, int)
 SHIM_SYSCALL_PASSTHROUGH(mremap, 5, void*, void*, addr, size_t, old_len, size_t, new_len, int,
                          flags, void*, new_addr)
 
-SHIM_SYSCALL_PASSTHROUGH(msync, 3, int, void*, start, size_t, len, int, flags)
+/* msync: sys/shim_mmap.c */
+DEFINE_SHIM_SYSCALL(msync, 3, shim_do_msync, int, void*, addr, size_t, len, int, flags)
 
 /* mincore: sys/shim_mmap.c */
 DEFINE_SHIM_SYSCALL(mincore, 3, shim_do_mincore, int, void*, start, size_t, len, unsigned char*,
