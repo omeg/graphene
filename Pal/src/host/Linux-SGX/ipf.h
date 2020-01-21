@@ -104,13 +104,19 @@ typedef enum {
     IPF_STATUS_CORRUPTED,
     IPF_STATUS_MEMORY_CORRUPTED,
     IPF_STATUS_FILE_NOT_SGX_FILE,
+    IPF_STATUS_INVALID_VERSION,
+    IPF_STATUS_RECOVERY_NEEDED,
+    IPF_STATUS_RECOVERY_FAILED,
     IPF_STATUS_CLOSED,
     IPF_STATUS_RANDOM_ERROR,
     IPF_STATUS_INVALID_PARAMETER,
     IPF_STATUS_NAME_TOO_LONG,
+    IPF_STATUS_NAME_MISMATCH,
     IPF_STATUS_NO_MEMORY,
     IPF_STATUS_DENIED,
-} protected_fs_status_e;
+    IPF_STATUS_MAC_MISMATCH,
+    IPF_STATUS_UNEXPECTED_ERROR,
+} ipf_status_t;
 
 #define MAX_PAGES_IN_CACHE 48
 
@@ -134,7 +140,9 @@ typedef enum {
 #define FULLNAME_MAX_LEN      (PATHNAME_MAX_LEN + FILENAME_MAX_LEN)
 #define RECOVERY_FILE_MAX_LEN (FULLNAME_MAX_LEN + 10)
 
+DEFINE_LIST(_file_mht_node);
 typedef struct _file_mht_node {
+    LIST_TYPE(_file_mht_node) list;
     /* these are exactly the same as file_data_node_t below, any change should apply to both (both are saved in the cache as void*) */
     uint8_t type;
     uint64_t mht_node_number;
@@ -151,8 +159,11 @@ typedef struct _file_mht_node {
     /* from here the structures are different */
     mht_node_t plain; // decrypted data
 } file_mht_node_t;
+DEFINE_LISTP(_file_mht_node);
 
+DEFINE_LIST(_file_data_node);
 typedef struct _file_data_node {
+    LIST_TYPE(_file_data_node) list;
     /* these are exactly the same as file_mht_node_t above, any change should apply to both (both are saved in the cache as void*) */
     uint8_t type;
     uint64_t data_node_number;
@@ -169,8 +180,90 @@ typedef struct _file_data_node {
     /* from here the structures are different */
     data_node_t plain; // decrypted data
 } file_data_node_t;
+DEFINE_LISTP(_file_data_node);
 
 uint32_t ipf_last_error; // last operation error
+
+#pragma pack(pop)
+
+/* Host callbacks (from ITL's implementation) */
+
+/*!
+ * \brief File open callback
+ *
+ * \param [in] path File path
+ * \param [in] mode Open mode
+ * \param [out] handle File handle
+ * \param [out] size (optional) File size
+ * \return PF status
+ */
+typedef pf_status_t (*pf_open_f)(const char* path, pf_file_mode_t mode, pf_handle_t* handle, size_t* size);
+
+/*!
+ * \brief File close callback
+ *
+ * \param [in] handle File handle
+ * \return PF status
+ */
+typedef pf_status_t (*pf_close_f)(pf_handle_t handle);
+
+/*!
+ * \brief File delete callback
+ *
+ * \param [in] path File path
+ * \return PF status
+ */
+typedef pf_status_t (*pf_delete_f)(const char* path);
+
+/*!
+ * \brief AES-CMAC callback
+ *
+ * \param [in] key AES key
+ * \param [in] key_size Size of \a key in bytes
+ * \param [in] input Plaintext data
+ * \param [in] input_size Size of \a input in bytes
+ * \param [out] mac CMAC computed for \a input
+ * \param [in] mac_size Size of \a mac in bytes
+ * \return PF status
+ */
+typedef pf_status_t (*pf_crypto_aes_cmac_f)(const void* key, size_t key_size,
+                                            const void* input, size_t input_size,
+                                            void* mac, size_t mac_size);
+
+/*!
+ * \brief Initialize I/O callbacks
+ *
+ * \param [in] malloc_f Allocate memory callback
+ * \param [in] free_f Free memory callback
+ * \param [in] map_f File map callback
+ * \param [in] unmap_f File unmap callback
+ * \param [in] truncate_f File truncate callback
+ * \param [in] flush_f File flush callback
+ * \param [in] open_f File open callback
+ * \param [in] close_f File close callback
+ * \param [in] delete_f File delete callback
+ * \param [in] debug_f (optional) Debug print callback
+ *
+ * \details Must be called before any actual APIs
+ */
+void ipf_set_callbacks(pf_malloc_f malloc_f, pf_free_f free_f, pf_map_f map_f, pf_unmap_f unmap_f,
+                       pf_truncate_f truncate_f, pf_flush_f flush_f, pf_open_f open_f,
+                       pf_close_f close_f, pf_delete_f delete_f, pf_debug_f debug_f);
+
+/*!
+ * \brief Initialize cryptographic callbacks
+ *
+ * \param [in] crypto_aes_gcm_encrypt_f AES-GCM encrypt callback
+ * \param [in] crypto_aes_gcm_decrypt_f AES-GCM decrypt callback
+ * \param [in] crypto_aes_cmac_f AES-CMAC callback
+ * \param [in] crypto_random_f Cryptographic random number generator callback
+ *
+ * \details Must be called before any actual APIs
+ */
+void ipf_set_crypto_callbacks(pf_crypto_aes_gcm_encrypt_f crypto_aes_gcm_encrypt_f,
+                              pf_crypto_aes_gcm_decrypt_f crypto_aes_gcm_decrypt_f,
+                              pf_crypto_aes_cmac_f crypto_aes_cmac_f,
+                              pf_crypto_random_f crypto_random_f);
 
 typedef struct _ipf_context {
     union {
@@ -183,14 +276,14 @@ typedef struct _ipf_context {
 
     meta_data_encrypted_t encrypted_part_plain; // encrypted part of meta data node, decrypted
     file_mht_node_t root_mht; // the root of the mht is always needed (for files bigger than 3KB)
-    int file;
+    pf_handle_t file;
     open_mode_t open_mode;
     uint8_t read_only;
     int64_t offset; // current file position (user's view)
     bool end_of_file; // flag
-    int64_t real_file_size;
+    size_t real_file_size;
     bool need_writing; // flag
-    protected_fs_status_e file_status;
+    ipf_status_t file_status;
     // mutex
     pf_key_t user_kdk_key;
     pf_key_t cur_key;
@@ -203,16 +296,17 @@ typedef struct _ipf_context {
 
 typedef ipf_context* ipf_context_t;
 
-#pragma pack(pop)
-
 // private
 // file_init.cpp
 bool ipf_cleanup_filename(const char* src, char* dest);
 void ipf_init_fields(ipf_context_t ipf);
-ipf_context_t ipf_init(const char* filename, open_mode_t mode, int fd, size_t real_size, const pf_key_t* kdk_key);
-bool ipf_file_recovery(const char* filename);
+bool ipf_file_recovery(ipf_context_t ipf, const char* filename);
 bool ipf_init_existing_file(ipf_context_t ipf, const char* filename, const char* clean_filename/*, const pf_key_t* import_key*/);
 bool ipf_init_new_file(ipf_context_t ipf, const char* clean_filename);
+
+// sgx_uprotected_fs.cpp
+bool ipf_read_node(pf_handle_t file, uint64_t node_number, void* buffer, uint32_t node_size);
+bool ipf_write_node(pf_handle_t file, uint64_t node_number, void* buffer, uint32_t node_size);
 
 // file_crypto.cpp
 bool ipf_generate_secure_blob(pf_key_t* key, const char* label, uint64_t physical_node_number, pf_mac_t* output);
@@ -220,36 +314,47 @@ bool ipf_generate_secure_blob_from_user_kdk(ipf_context_t ipf, bool restore);
 bool ipf_init_session_master_key(ipf_context_t ipf);
 bool ipf_derive_random_node_key(ipf_context_t ipf, uint64_t physical_node_number);
 bool ipf_generate_random_meta_data_key(ipf_context_t ipf);
-bool ipf_restore_current_meta_data_key(ipf_context_t ipf, const pf_key_t* import_key);
+bool ipf_restore_current_meta_data_key(ipf_context_t ipf/*, const pf_key_t* import_key*/);
 
-file_data_node_t* ipf_get_data_node();
-file_data_node_t* ipf_read_data_node();
-file_data_node_t* ipf_append_data_node();
-file_mht_node_t*  ipf_get_mht_node();
-file_mht_node_t*  ipf_read_mht_node(uint64_t mht_node_number);
-file_mht_node_t*  ipf_append_mht_node(uint64_t mht_node_number);
-bool ipf_write_recovery_file();
-bool ipf_set_update_flag(bool flush_to_disk);
-void ipf_clear_update_flag();
-bool ipf_update_all_data_and_mht_nodes();
-bool ipf_update_meta_data_node();
-bool ipf_write_all_changes_to_disk(bool flush_to_disk);
-void ipf_erase_recovery_file();
-bool ipf_internal_flush(/*bool mc,*/ bool flush_to_disk);
-
-void ipf_destroy(ipf_context_t ipf);
+file_data_node_t* ipf_get_data_node(ipf_context_t ipf);
+file_data_node_t* ipf_read_data_node(ipf_context_t ipf);
+file_data_node_t* ipf_append_data_node(ipf_context_t ipf);
+file_mht_node_t*  ipf_get_mht_node(ipf_context_t ipf);
+file_mht_node_t*  ipf_read_mht_node(ipf_context_t ipf, uint64_t mht_node_number);
+file_mht_node_t*  ipf_append_mht_node(ipf_context_t ipf, uint64_t mht_node_number);
+bool ipf_write_recovery_file(ipf_context_t ipf);
+bool ipf_set_update_flag(ipf_context_t ipf, bool flush_to_disk);
+void ipf_clear_update_flag(ipf_context_t ipf);
+bool ipf_update_all_data_and_mht_nodes(ipf_context_t ipf);
+bool ipf_update_meta_data_node(ipf_context_t ipf);
+bool ipf_write_all_changes_to_disk(ipf_context_t ipf, bool flush_to_disk);
+bool ipf_erase_recovery_file(ipf_context_t ipf);
+bool ipf_internal_flush(ipf_context_t ipf, /*bool mc,*/ bool flush_to_disk);
+bool ipf_do_file_recovery(const char* filename, const char* recovery_filename, uint32_t node_size);
+bool ipf_pre_close(ipf_context_t ipf/*, pf_key_t* key, bool import*/);
+bool ipf_clear_cache(ipf_context_t ipf);
 
 // public
-size_t   ipf_write(const void* ptr, size_t size, size_t count);
-size_t   ipf_read(void* ptr, size_t size, size_t count);
-int64_t  ipf_tell();
-int      ipf_seek(int64_t new_offset, int origin);
-bool     ipf_get_eof();
-uint32_t ipf_get_error();
-void     ipf_clear_error();
-int32_t  ipf_clear_cache();
-bool     ipf_flush(/*bool mc*/);
-bool     ipf_pre_close(pf_key_t* key, bool import);
-int32_t  ipf_remove(const char* filename);
+ipf_context_t ipf_open(const char* filename, open_mode_t mode, pf_handle_t file, size_t real_size, const pf_key_t* kdk_key);
+bool ipf_close(ipf_context_t ipf);
+size_t ipf_read(ipf_context_t ipf, void* ptr, size_t size, size_t count);
+size_t ipf_write(ipf_context_t ipf, const void* ptr, size_t size, size_t count);
+int64_t ipf_tell(ipf_context_t ipf);
+bool ipf_seek(ipf_context_t ipf, int64_t new_offset, int origin);
+bool ipf_get_eof(ipf_context_t ipf);
+ipf_status_t ipf_get_error(ipf_context_t ipf);
+void ipf_clear_error(ipf_context_t ipf);
+bool ipf_flush(ipf_context_t ipf/*, bool mc*/);
+bool ipf_remove(const char* filename);
+
+#ifndef SEEK_SET
+#define	SEEK_SET	0	/* set file offset to offset */
+#endif
+#ifndef SEEK_CUR
+#define	SEEK_CUR	1	/* set file offset to current plus offset */
+#endif
+#ifndef SEEK_END
+#define	SEEK_END	2	/* set file offset to EOF plus offset */
+#endif
 
 #endif
