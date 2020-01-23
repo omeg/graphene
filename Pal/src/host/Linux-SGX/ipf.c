@@ -150,10 +150,10 @@ ipf_status_t check_callbacks() {
 
 // from musl
 int strncmp(const char *_l, const char *_r, size_t n) {
-	const unsigned char *l=(void *)_l, *r=(void *)_r;
-	if (!n--) return 0;
-	for (; *l && *r && n && *l == *r ; l++, r++, n--);
-	return *l - *r;
+    const unsigned char *l=(void *)_l, *r=(void *)_r;
+    if (!n--) return 0;
+    for (; *l && *r && n && *l == *r ; l++, r++, n--);
+    return *l - *r;
 }
 
 inline bool consttime_memequal(const void* a, const void* b, size_t size) {
@@ -288,7 +288,6 @@ bool ipf_generate_secure_blob_from_user_kdk(ipf_context_t ipf, bool restore) {
     } else {
         memcpy(&buf.nonce32, &ipf->file_meta_data.plain_part.meta_data_key_id, sizeof(buf.nonce32));
     }
-
 
     // length of output (128 bits)
     buf.output_len = 0x80;
@@ -1212,6 +1211,54 @@ void ipf_clear_update_flag(ipf_context_t ipf) {
     cb_flush(ipf->file);
 }
 
+// sort function, we need the mht nodes sorted before we start to update their gmac's
+bool mht_sort(const void* first, const void* second) {
+    // higher (lower tree level) node number first
+    if (!first || !second)
+        return false;
+
+    return (((file_mht_node_t*)first)->mht_node_number >
+            ((file_mht_node_t*)second)->mht_node_number);
+}
+
+#define LISTP_SORT(LISTP, STRUCT_NAME, SORT_FUNC)                                       \
+    do {                                                                                \
+        struct STRUCT_NAME* head  = NULL;                                               \
+        struct STRUCT_NAME* outer = NULL;                                               \
+        struct STRUCT_NAME* inner = NULL;                                               \
+        head                = LISTP_FIRST_ENTRY(LISTP, STRUCT_NAME, list);              \
+        outer               = head;                                                     \
+        bool adjacent_nodes = false;                                                    \
+        while (outer != NULL) {                                                         \
+            inner = LISTP_NEXT_ENTRY(outer, LISTP, list);                               \
+            while (inner != NULL) {                                                     \
+                if (!SORT_FUNC(outer, inner)) {                                         \
+                    struct STRUCT_NAME* for_swap = NULL;                                \
+                    adjacent_nodes =                                                    \
+                        (LISTP_NEXT_ENTRY(outer, LISTP, list) == inner) ? true : false; \
+                    if (!adjacent_nodes) {                                              \
+                        struct STRUCT_NAME* prev_of_inner =                             \
+                            LISTP_PREV_ENTRY(inner, LISTP, list);                       \
+                        struct STRUCT_NAME* prev_of_outer =                             \
+                            LISTP_PREV_ENTRY(outer, LISTP, list);                       \
+                        LISTP_DEL(inner, LISTP, list);                                  \
+                        LISTP_DEL(outer, LISTP, list);                                  \
+                        LISTP_ADD_AFTER(inner, prev_of_outer, LISTP, list);             \
+                        LISTP_ADD_AFTER(outer, prev_of_inner, LISTP, list);             \
+                    } else {                                                            \
+                        LISTP_DEL(outer, LISTP, list);                                  \
+                        LISTP_ADD_AFTER(outer, inner, LISTP, list);                     \
+                    }                                                                   \
+                    for_swap = inner;                                                   \
+                    inner    = outer;                                                   \
+                    outer    = for_swap;                                                \
+                }                                                                       \
+                inner = LISTP_NEXT_ENTRY(inner, LISTP, list);                           \
+            }                                                                           \
+            outer = LISTP_NEXT_ENTRY(outer, LISTP, list);                               \
+        }                                                                               \
+    } while (0)
+
 bool ipf_update_all_data_and_mht_nodes(ipf_context_t ipf) {
     LISTP_TYPE(_file_mht_node) mht_list = LISTP_INIT;
     file_mht_node_t* file_mht_node;
@@ -1273,8 +1320,8 @@ bool ipf_update_all_data_and_mht_nodes(ipf_context_t ipf) {
         data = lruc_get_next(ipf->cache);
     }
 
-    // sort the list from the last node to the first (bottom layers first)
-    //mht_list.sort(mht_order); // TODO!
+	// sort the list from the last node to the first (bottom layers first)
+	LISTP_SORT(&mht_list, _file_mht_node, mht_sort);
 
     // update the gmacs in the parents
     struct _file_mht_node* node;
