@@ -385,7 +385,7 @@ typedef struct _file_data_node {
 } file_data_node_t;
 DEFINE_LISTP(_file_data_node);
 
-uint32_t ipf_last_error; // last operation error
+extern pf_status_t pf_last_error; // last operation error
 
 #pragma pack(pop)
 
