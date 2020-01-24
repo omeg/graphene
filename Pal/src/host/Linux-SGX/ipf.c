@@ -47,8 +47,17 @@
  *
  */
 
+#include <string.h>
 #include "ipf.h"
-#include <pal_crypto.h>
+
+size_t strnlen(const char *str, size_t maxlen);
+
+int _strncmp(const char *_l, const char *_r, size_t n) {
+    const unsigned char *l=(void *)_l, *r=(void *)_r;
+    if (!n--) return 0;
+    for (; *l && *r && n && *l == *r ; l++, r++, n--);
+    return *l - *r;
+}
 
 /* Host callbacks (from ITL's implementation) */
 static pf_malloc_f   cb_malloc   = NULL;
@@ -64,7 +73,6 @@ static pf_debug_f    cb_debug    = NULL;
 
 static pf_crypto_aes_gcm_encrypt_f cb_crypto_aes_gcm_encrypt = NULL;
 static pf_crypto_aes_gcm_decrypt_f cb_crypto_aes_gcm_decrypt = NULL;
-static pf_crypto_aes_cmac_f        cb_crypto_aes_cmac        = NULL;
 static pf_crypto_random_f          cb_crypto_random          = NULL;
 
 /* Debug print without function name prefix. Implicit param: pf (context pointer). */
@@ -108,9 +116,9 @@ void __hexdump(const void* data, size_t size) {
 #define __HEXDUMPNL(data, size) { if (cb_debug) { __hexdump(data, size); __DEBUG_PF("\n"); } }
 #define HEXDUMPNL(x) __HEXDUMPNL((void*)&(x), sizeof(x))
 
-void ipf_set_callbacks(pf_malloc_f malloc_f, pf_free_f free_f, pf_map_f map_f, pf_unmap_f unmap_f,
-                       pf_truncate_f truncate_f, pf_flush_f flush_f, pf_open_f open_f,
-                       pf_close_f close_f, pf_delete_f delete_f, pf_debug_f debug_f) {
+void pf_set_callbacks(pf_malloc_f malloc_f, pf_free_f free_f, pf_map_f map_f, pf_unmap_f unmap_f,
+                      pf_truncate_f truncate_f, pf_flush_f flush_f, pf_open_f open_f,
+                      pf_close_f close_f, pf_delete_f delete_f, pf_debug_f debug_f) {
     cb_malloc   = malloc_f;
     cb_free     = free_f;
     cb_map      = map_f;
@@ -123,17 +131,15 @@ void ipf_set_callbacks(pf_malloc_f malloc_f, pf_free_f free_f, pf_map_f map_f, p
     cb_debug    = debug_f;
 }
 
-void ipf_set_crypto_callbacks(pf_crypto_aes_gcm_encrypt_f crypto_aes_gcm_encrypt_f,
-                              pf_crypto_aes_gcm_decrypt_f crypto_aes_gcm_decrypt_f,
-                              pf_crypto_aes_cmac_f crypto_aes_cmac_f,
-                              pf_crypto_random_f crypto_random_f) {
+void pf_set_crypto_callbacks(pf_crypto_aes_gcm_encrypt_f crypto_aes_gcm_encrypt_f,
+                             pf_crypto_aes_gcm_decrypt_f crypto_aes_gcm_decrypt_f,
+                             pf_crypto_random_f crypto_random_f) {
     cb_crypto_aes_gcm_encrypt = crypto_aes_gcm_encrypt_f;
     cb_crypto_aes_gcm_decrypt = crypto_aes_gcm_decrypt_f;
-    cb_crypto_aes_cmac = crypto_aes_cmac_f;
     cb_crypto_random = crypto_random_f;
 }
 
-ipf_status_t check_callbacks() {
+pf_status_t check_callbacks() {
     return (cb_malloc != NULL &&
             cb_free != NULL &&
             cb_map != NULL &&
@@ -142,19 +148,12 @@ ipf_status_t check_callbacks() {
             cb_flush != NULL &&
             cb_crypto_aes_gcm_encrypt != NULL &&
             cb_crypto_aes_gcm_decrypt != NULL &&
-            cb_crypto_aes_cmac != NULL &&
-            cb_crypto_random != NULL) ? IPF_STATUS_OK : IPF_STATUS_NOT_INITIALIZED;
+            cb_crypto_random != NULL) ? PF_STATUS_SUCCESS : PF_STATUS_UNINITIALIZED;
 }
+
+static pf_iv_t empty_iv = {0};
 
 // global/util
-
-// from musl
-int strncmp(const char *_l, const char *_r, size_t n) {
-    const unsigned char *l=(void *)_l, *r=(void *)_r;
-    if (!n--) return 0;
-    for (; *l && *r && n && *l == *r ; l++, r++, n--);
-    return *l - *r;
-}
 
 inline bool consttime_memequal(const void* a, const void* b, size_t size) {
     uint32_t x;
@@ -204,7 +203,7 @@ typedef struct {
     uint64_t node_number; // context 1
     union { // context 2
         pf_mac_t nonce16;
-        sgx_key_id_t nonce32;
+        pf_keyid_t nonce32; // sgx_key_id_t
     };
     uint32_t output_len; // in bits
 } kdf_input_t;
@@ -214,7 +213,7 @@ bool ipf_generate_secure_blob(pf_key_t* key, const char* label, uint64_t physica
 
     uint32_t len = (uint32_t)strnlen(label, MAX_LABEL_LEN + 1);
     if (len > MAX_LABEL_LEN) {
-        ipf_last_error = IPF_STATUS_INVALID_PARAMETER;
+        ipf_last_error = PF_STATUS_INVALID_PARAMETER;
         return false;
     }
 
@@ -236,8 +235,8 @@ bool ipf_generate_secure_blob(pf_key_t* key, const char* label, uint64_t physica
     //           optionally, a nonce known by the parties who derive the keys.
     buf.node_number = physical_node_number;
 
-    ipf_status_t status = cb_crypto_random((uint8_t*)&buf.nonce16, sizeof(buf.nonce16));
-    if (status != IPF_STATUS_OK) {
+    pf_status_t status = cb_crypto_random((uint8_t*)&buf.nonce16, sizeof(buf.nonce16));
+    if (status != PF_STATUS_SUCCESS) {
         ipf_last_error = status;
         return false;
     }
@@ -245,8 +244,9 @@ bool ipf_generate_secure_blob(pf_key_t* key, const char* label, uint64_t physica
     // length of output (128 bits)
     buf.output_len = 0x80;
 
-    status = cb_crypto_aes_cmac(key, sizeof(*key), &buf, sizeof(buf), output, sizeof(*output));
-    if (status != IPF_STATUS_OK) {
+    //status = cb_crypto_aes_cmac(key, &buf, sizeof(buf), output);
+    status = cb_crypto_aes_gcm_encrypt(key, &empty_iv, &buf, sizeof(buf), NULL, 0, NULL, output);
+    if (status != PF_STATUS_SUCCESS) {
         ipf_last_error = status;
         return false;
     }
@@ -256,9 +256,9 @@ bool ipf_generate_secure_blob(pf_key_t* key, const char* label, uint64_t physica
     return true;
 }
 
-bool ipf_generate_secure_blob_from_user_kdk(ipf_context_t ipf, bool restore) {
+bool ipf_generate_secure_blob_from_user_kdk(pf_context_t ipf, bool restore) {
     kdf_input_t buf = {0};
-    ipf_status_t status;
+    pf_status_t status;
 
     // index
     // SP800-108:
@@ -281,7 +281,7 @@ bool ipf_generate_secure_blob_from_user_kdk(ipf_context_t ipf, bool restore) {
     // use 32 bytes here just for compatibility with the seal key API
     if (!restore) {
         status = cb_crypto_random((uint8_t*)&buf.nonce32, sizeof(buf.nonce32));
-        if (status != IPF_STATUS_OK) {
+        if (status != PF_STATUS_SUCCESS) {
             ipf_last_error = status;
             return false;
         }
@@ -292,10 +292,10 @@ bool ipf_generate_secure_blob_from_user_kdk(ipf_context_t ipf, bool restore) {
     // length of output (128 bits)
     buf.output_len = 0x80;
 
-    status = cb_crypto_aes_cmac(&ipf->user_kdk_key, sizeof(ipf->user_kdk_key), &buf, sizeof(buf),
-                                &ipf->cur_key, sizeof(ipf->cur_key));
-
-     if (status != IPF_STATUS_OK) {
+    //status = cb_crypto_aes_cmac(&ipf->user_kdk_key, &buf, sizeof(buf), &ipf->cur_key);
+    status = cb_crypto_aes_gcm_encrypt(&ipf->user_kdk_key, &empty_iv, &buf, sizeof(buf), NULL, 0,
+                                       NULL, &ipf->cur_key);
+    if (status != PF_STATUS_SUCCESS) {
         ipf_last_error = status;
         return false;
     }
@@ -310,7 +310,7 @@ bool ipf_generate_secure_blob_from_user_kdk(ipf_context_t ipf, bool restore) {
     return true;
 }
 
-bool ipf_init_session_master_key(ipf_context_t ipf) {
+bool ipf_init_session_master_key(pf_context_t ipf) {
     pf_key_t empty_key = {0};
 
     if (!ipf_generate_secure_blob(&empty_key, MASTER_KEY_NAME, 0, (pf_mac_t*)&ipf->session_master_key))
@@ -321,7 +321,7 @@ bool ipf_init_session_master_key(ipf_context_t ipf) {
     return true;
 }
 
-bool ipf_derive_random_node_key(ipf_context_t ipf, uint64_t physical_node_number) {
+bool ipf_derive_random_node_key(pf_context_t ipf, uint64_t physical_node_number) {
     if (ipf->master_key_count++ > MAX_MASTER_KEY_USAGES) {
         if (!ipf_init_session_master_key(ipf))
             return false;
@@ -334,7 +334,7 @@ bool ipf_derive_random_node_key(ipf_context_t ipf, uint64_t physical_node_number
     return true;
 }
 
-bool ipf_generate_random_meta_data_key(ipf_context_t ipf) {
+bool ipf_generate_random_meta_data_key(pf_context_t ipf) {
     // we don't use autogenerated keys
     return ipf_generate_secure_blob_from_user_kdk(ipf, false);
 
@@ -382,7 +382,7 @@ bool ipf_generate_random_meta_data_key(ipf_context_t ipf) {
     */
 }
 
-bool ipf_restore_current_meta_data_key(ipf_context_t ipf/*, const pf_key_t* import_key*/) {
+bool ipf_restore_current_meta_data_key(pf_context_t ipf/*, const pf_key_t* import_key*/) {
     /*
     if (import_key != NULL) {
         memcpy(&ipf->cur_key, import_key, sizeof(ipf->cur_key));
@@ -432,6 +432,7 @@ bool ipf_restore_current_meta_data_key(ipf_context_t ipf/*, const pf_key_t* impo
 
 // file_init.cpp
 
+// strips path components, leaves file name
 bool ipf_cleanup_filename(const char* src, char* dest) {
     const char* p = src;
     const char* name = src;
@@ -443,7 +444,7 @@ bool ipf_cleanup_filename(const char* src, char* dest) {
     }
 
     if (strnlen(name, FILENAME_MAX_LEN) >= FILENAME_MAX_LEN - 1) {
-        ipf_last_error = IPF_STATUS_NAME_TOO_LONG;
+        ipf_last_error = PF_STATUS_PATH_TOO_LONG;
         return false;
     }
 
@@ -451,18 +452,18 @@ bool ipf_cleanup_filename(const char* src, char* dest) {
     dest[FILENAME_MAX_LEN - 1] = '\0';
 
     if (strnlen(dest, 1) == 0) {
-        ipf_last_error = IPF_STATUS_INVALID_PARAMETER;
+        ipf_last_error = PF_STATUS_INVALID_PARAMETER;
         return false;
     }
 
     return true;
 }
 
-void ipf_init_fields(ipf_context_t ipf) {
+void ipf_init_fields(pf_context_t ipf) {
     ipf->meta_data_node_number = 0;
     memset(&ipf->file_meta_data, 0, sizeof(ipf->file_meta_data));
     memset(&ipf->encrypted_part_plain, 0, sizeof(ipf->encrypted_part_plain));
-    memset(&ipf->empty_iv, 0, sizeof(ipf->empty_iv));
+    memset(&empty_iv, 0, sizeof(empty_iv));
     memset(&ipf->root_mht, 0, sizeof(ipf->root_mht));
 
     ipf->root_mht.type = FILE_MHT_NODE_TYPE;
@@ -476,8 +477,8 @@ void ipf_init_fields(ipf_context_t ipf) {
     ipf->end_of_file = false;
     ipf->need_writing = false;
     ipf->read_only = 0;
-    ipf->file_status = IPF_STATUS_NOT_INITIALIZED;
-    ipf_last_error = IPF_STATUS_OK;
+    ipf->file_status = PF_STATUS_UNINITIALIZED;
+    ipf_last_error = PF_STATUS_SUCCESS;
     ipf->real_file_size = 0;
     ipf->open_mode.raw = 0;
     ipf->master_key_count = 0;
@@ -492,25 +493,27 @@ void ipf_init_fields(ipf_context_t ipf) {
 }
 
 // constructor
-ipf_context_t ipf_open(const char* filename, open_mode_t mode, pf_handle_t file, size_t real_size, const pf_key_t* kdk_key) {
-    ipf_context* ipf = cb_malloc(sizeof(ipf_context));
+pf_context_t ipf_open(const char* filename, open_mode_t mode, pf_handle_t file, size_t real_size,
+                      const pf_key_t* kdk_key) {
+    pf_context* ipf = cb_malloc(sizeof(pf_context));
 
     if (!ipf) {
-        ipf_last_error = IPF_STATUS_NO_MEMORY;
+        ipf_last_error = PF_STATUS_NO_MEMORY;
         goto out;
     }
 
     ipf_init_fields(ipf);
 
-    if (filename == NULL || strnlen(filename, 1) == 0 || kdk_key == NULL ||
-        (mode.write == 0 && mode.read == 0 && mode.append == 0)) {
+    // ITL: filename can be NULL for existing files, then we skip path verification
+    if (/*filename == NULL || strnlen(filename, 1) == 0 || */kdk_key == NULL ||
+        (mode.write == 0 && mode.read == 0/* && mode.append == 0*/)) {
 
-        ipf_last_error = IPF_STATUS_INVALID_PARAMETER;
+        ipf_last_error = PF_STATUS_INVALID_PARAMETER;
         goto out;
     }
 
-    if (strnlen(filename, FULLNAME_MAX_LEN) >= FULLNAME_MAX_LEN - 1) {
-        ipf_last_error = IPF_STATUS_NAME_TOO_LONG;
+    if (filename && strnlen(filename, FULLNAME_MAX_LEN) >= FULLNAME_MAX_LEN - 1) {
+        ipf_last_error = PF_STATUS_PATH_TOO_LONG;
         goto out;
     }
 
@@ -534,18 +537,19 @@ ipf_context_t ipf_open(const char* filename, open_mode_t mode, pf_handle_t file,
         //use_user_kdk_key = 1;
         pf_key_t empty_key = {0};
         if (consttime_memequal(kdk_key, &empty_key, sizeof(kdk_key))) {
-            ipf_last_error = IPF_STATUS_INVALID_PARAMETER;
+            ipf_last_error = PF_STATUS_INVALID_PARAMETER;
             goto out;
         }
         memcpy(&ipf->user_kdk_key, kdk_key, sizeof(ipf->user_kdk_key));
     }
 
+    /* // ITL: we require a canonical full path to file
     // get the clean file name (original name might be clean or with relative path or with absolute path...)
     char clean_filename[FILENAME_MAX_LEN];
     if (!ipf_cleanup_filename(filename, clean_filename)) {
         // last_error already set
         goto out;
-    }
+    }*/
 
     /*
     if (import_key != NULL)
@@ -605,46 +609,48 @@ ipf_context_t ipf_open(const char* filename, open_mode_t mode, pf_handle_t file,
     // read only files can be opened simultaneously by many enclaves
 
     if (!file) {
-        ipf_last_error = IPF_STATUS_INVALID_PARAMETER;
+        ipf_last_error = PF_STATUS_INVALID_PARAMETER;
         goto out;
     }
 
     if (real_size % NODE_SIZE != 0) {
-        ipf_last_error = IPF_STATUS_FILE_NOT_SGX_FILE;
+        ipf_last_error = PF_STATUS_INVALID_HEADER;
         goto out;
     }
 
     ipf->file = file;
     ipf->real_file_size = real_size;
 
-    strncpy(ipf->recovery_filename, filename, FULLNAME_MAX_LEN - 1); // copy full file name
-    ipf->recovery_filename[FULLNAME_MAX_LEN - 1] = '\0'; // just to be safe
-    size_t full_name_len = strnlen(ipf->recovery_filename, RECOVERY_FILE_MAX_LEN);
-    strncpy(&ipf->recovery_filename[full_name_len], "_recovery", 10);
+    if (filename) {
+        strncpy(ipf->recovery_filename, filename, FULLNAME_MAX_LEN - 1); // copy full file name
+        ipf->recovery_filename[FULLNAME_MAX_LEN - 1] = '\0'; // just to be safe
+        size_t full_name_len = strnlen(ipf->recovery_filename, RECOVERY_FILE_MAX_LEN);
+        strncpy(&ipf->recovery_filename[full_name_len], "_recovery", 10);
+    }
 
     if (ipf->real_file_size > 0) {
         // existing file
         if (ipf->open_mode.write == 1) {
             // redundant check, just in case
-            ipf_last_error = IPF_STATUS_DENIED;
+            ipf_last_error = PF_STATUS_INVALID_MODE;
             goto out;
         }
 
-        if (!ipf_init_existing_file(ipf, filename, clean_filename/*, import_key*/))
+        if (!ipf_init_existing_file(ipf, filename, /*clean_*/filename/*, import_key*/))
             goto out;
 
-        if (ipf->open_mode.append == 1 && ipf->open_mode.update == 0)
-            ipf->offset = ipf->encrypted_part_plain.size;
+        //if (ipf->open_mode.append == 1 && ipf->open_mode.update == 0)
+        //    ipf->offset = ipf->encrypted_part_plain.size;
     } else {
         // new file
-        if (!ipf_init_new_file(ipf, clean_filename))
+        if (!ipf_init_new_file(ipf, /*clean_*/filename))
             goto out;
     }
 
-    ipf_last_error = ipf->file_status = IPF_STATUS_OK;
+    ipf_last_error = ipf->file_status = PF_STATUS_SUCCESS;
 
 out:
-    if (ipf_last_error != IPF_STATUS_OK) {
+    if (ipf_last_error != PF_STATUS_SUCCESS) {
         cb_free(ipf);
         ipf = NULL;
     }
@@ -652,12 +658,17 @@ out:
     return ipf;
 }
 
-bool ipf_file_recovery(ipf_context_t ipf, const char* filename) {
-    ipf_status_t status;
+bool ipf_file_recovery(pf_context_t ipf, const char* filename) {
+    pf_status_t status;
     size_t new_file_size = 0;
 
+    if (!filename) { // no path was passed during open
+        ipf_last_error = PF_STATUS_RECOVERY_IMPOSSIBLE;
+        return false;
+    }
+
     status = cb_close(ipf->file);
-    if (status != IPF_STATUS_OK) {
+    if (status != PF_STATUS_SUCCESS) {
         ipf_last_error = status;
         return false;
     }
@@ -665,21 +676,21 @@ bool ipf_file_recovery(ipf_context_t ipf, const char* filename) {
     ipf->file = NULL;
 
     status = ipf_do_file_recovery(filename, ipf->recovery_filename, NODE_SIZE);
-    if (status != IPF_STATUS_OK) {
+    if (status != PF_STATUS_SUCCESS) {
         ipf_last_error = status;
         return false;
     }
 
     status = cb_open(filename, ipf->read_only ? PF_FILE_MODE_READ : PF_FILE_MODE_WRITE,
                      &ipf->file, &new_file_size);
-    if (status != IPF_STATUS_OK || ipf->file == NULL) {
+    if (status != PF_STATUS_SUCCESS || ipf->file == NULL) {
         ipf_last_error = status;
         return false;
     }
 
     // recovery only change existing data, it does not shrink or grow the file
     if (new_file_size != ipf->real_file_size) {
-        ipf_last_error = IPF_STATUS_UNEXPECTED_ERROR;
+        ipf_last_error = PF_STATUS_UNKNOWN_ERROR;
         return false;
     }
 
@@ -694,8 +705,8 @@ bool ipf_read_node(pf_handle_t file, uint64_t node_number, void* buffer, uint32_
     uint64_t offset = node_number * node_size;
 
     void* ptr;
-    ipf_status_t status = cb_map(file, PF_FILE_MODE_READ, offset, node_size, &ptr);
-    if (status != IPF_STATUS_OK) {
+    pf_status_t status = cb_map(file, PF_FILE_MODE_READ, offset, node_size, &ptr);
+    if (status != PF_STATUS_SUCCESS) {
         ipf_last_error = status;
         return false;
     }
@@ -703,7 +714,7 @@ bool ipf_read_node(pf_handle_t file, uint64_t node_number, void* buffer, uint32_
     memcpy(buffer, ptr, node_size);
 
     status = cb_unmap(ptr, node_size);
-    if (status != IPF_STATUS_OK) {
+    if (status != PF_STATUS_SUCCESS) {
         ipf_last_error = status;
         return false;
     }
@@ -713,8 +724,8 @@ bool ipf_read_node(pf_handle_t file, uint64_t node_number, void* buffer, uint32_
 
 bool ipf_write_file(pf_handle_t file, uint64_t offset, void* buffer, uint32_t size) {
     void* ptr;
-    ipf_status_t status = cb_map(file, PF_FILE_MODE_WRITE, offset, size, &ptr);
-    if (status != IPF_STATUS_OK) {
+    pf_status_t status = cb_map(file, PF_FILE_MODE_WRITE, offset, size, &ptr);
+    if (status != PF_STATUS_SUCCESS) {
         ipf_last_error = status;
         return false;
     }
@@ -722,7 +733,7 @@ bool ipf_write_file(pf_handle_t file, uint64_t offset, void* buffer, uint32_t si
     memcpy(ptr, buffer, size);
 
     status = cb_unmap(ptr, size);
-    if (status != IPF_STATUS_OK) {
+    if (status != PF_STATUS_SUCCESS) {
         ipf_last_error = status;
         return false;
     }
@@ -734,24 +745,24 @@ bool ipf_write_node(pf_handle_t file, uint64_t node_number, void* buffer, uint32
     return ipf_write_file(file, node_number * node_size, buffer, node_size);
 }
 
-bool ipf_init_existing_file(ipf_context_t ipf, const char* filename, const char* clean_filename/*, const pf_key_t* import_key*/) {
-    ipf_status_t status;
+bool ipf_init_existing_file(pf_context_t ipf, const char* filename, const char* clean_filename/*, const pf_key_t* import_key*/) {
+    pf_status_t status;
 
     // read meta-data node
     status = ipf_read_node(ipf->file, 0, (uint8_t*)&ipf->file_meta_data, NODE_SIZE);
-    if (status != IPF_STATUS_OK) {
+    if (status != PF_STATUS_SUCCESS) {
         ipf_last_error = status;
         return false;
     }
 
     if (ipf->file_meta_data.plain_part.file_id != SGX_FILE_ID) {
         // such a file exists, but it is not an SGX file
-        ipf_last_error = IPF_STATUS_FILE_NOT_SGX_FILE;
+        ipf_last_error = PF_STATUS_INVALID_HEADER;
         return false;
     }
 
     if (ipf->file_meta_data.plain_part.major_version != SGX_FILE_MAJOR_VERSION) {
-        ipf_last_error = IPF_STATUS_INVALID_VERSION;
+        ipf_last_error = PF_STATUS_INVALID_VERSION;
         return false;
     }
 
@@ -759,19 +770,19 @@ bool ipf_init_existing_file(ipf_context_t ipf, const char* filename, const char*
         // file was in the middle of an update, must do a recovery
         if (!ipf_file_recovery(ipf, filename)) {
             // override internal error
-            ipf_last_error = IPF_STATUS_RECOVERY_NEEDED;
+            ipf_last_error = PF_STATUS_RECOVERY_NEEDED;
             return false;
         }
 
         if (ipf->file_meta_data.plain_part.update_flag == 1) {
             // recovery failed, flag is still set!
-            ipf_last_error = IPF_STATUS_RECOVERY_NEEDED;
+            ipf_last_error = PF_STATUS_RECOVERY_NEEDED;
             return false;
         }
 
         // re-check after recovery
         if (ipf->file_meta_data.plain_part.major_version != SGX_FILE_MAJOR_VERSION) {
-            ipf_last_error = IPF_STATUS_INVALID_VERSION;
+            ipf_last_error = PF_STATUS_INVALID_VERSION;
             return false;
         }
     }
@@ -785,19 +796,17 @@ bool ipf_init_existing_file(ipf_context_t ipf, const char* filename, const char*
         return false;
 
     // decrypt the encrypted part of the meta-data
-    status = cb_crypto_aes_gcm_decrypt((const uint8_t*)&ipf->cur_key, sizeof(ipf->cur_key),
-                                       (const uint8_t*)&ipf->empty_iv, sizeof(ipf->empty_iv),
-                                       NULL, 0, // aad
+    status = cb_crypto_aes_gcm_decrypt(&ipf->cur_key, &empty_iv, NULL, 0,
                                        &ipf->file_meta_data.encrypted_part, sizeof(ipf->file_meta_data.encrypted_part),
                                        &ipf->encrypted_part_plain,
-                                       (const uint8_t*)&ipf->file_meta_data.plain_part.meta_data_gmac, sizeof(ipf->file_meta_data.plain_part.meta_data_gmac));
-    if (status != IPF_STATUS_OK) {
+                                       &ipf->file_meta_data.plain_part.meta_data_gmac);
+    if (status != PF_STATUS_SUCCESS) {
         ipf_last_error = status;
         return false;
     }
 
-    if (strncmp(clean_filename, ipf->encrypted_part_plain.clean_filename, FILENAME_MAX_LEN) != 0) {
-        ipf_last_error = IPF_STATUS_NAME_MISMATCH;
+    if (_strncmp(clean_filename, ipf->encrypted_part_plain.clean_filename, FILENAME_MAX_LEN) != 0) {
+        ipf_last_error = PF_STATUS_INVALID_PATH;
         return false;
     }
 
@@ -847,13 +856,12 @@ bool ipf_init_existing_file(ipf_context_t ipf, const char* filename, const char*
             return false;
 
         // this also verifies the root mht gmac against the gmac in the meta-data encrypted part
-        status = cb_crypto_aes_gcm_decrypt((const uint8_t*)&ipf->encrypted_part_plain.mht_key, sizeof(ipf->encrypted_part_plain.mht_key),
-                                           (const uint8_t*)&ipf->empty_iv, sizeof(ipf->empty_iv),
+        status = cb_crypto_aes_gcm_decrypt(&ipf->encrypted_part_plain.mht_key, &empty_iv,
                                            NULL, 0, // aad
                                            &ipf->root_mht.encrypted.cipher, NODE_SIZE,
                                            &ipf->root_mht.plain,
-                                           (const uint8_t*)&ipf->encrypted_part_plain.mht_gmac, sizeof(ipf->encrypted_part_plain.mht_gmac));
-        if (status != IPF_STATUS_OK) {
+                                           &ipf->encrypted_part_plain.mht_gmac);
+        if (status != PF_STATUS_SUCCESS) {
             ipf_last_error = status;
             return false;
         }
@@ -864,7 +872,7 @@ bool ipf_init_existing_file(ipf_context_t ipf, const char* filename, const char*
     return true;
 }
 
-bool ipf_init_new_file(ipf_context_t ipf, const char* clean_filename) {
+bool ipf_init_new_file(pf_context_t ipf, const char* clean_filename) {
     ipf->file_meta_data.plain_part.file_id = SGX_FILE_ID;
     ipf->file_meta_data.plain_part.major_version = SGX_FILE_MAJOR_VERSION;
     ipf->file_meta_data.plain_part.minor_version = SGX_FILE_MINOR_VERSION;
@@ -879,7 +887,7 @@ bool ipf_init_new_file(ipf_context_t ipf, const char* clean_filename) {
 }
 
 // destructor
-bool ipf_close(ipf_context_t ipf) {
+bool ipf_close(pf_context_t ipf) {
     void* data;
     bool retval = true;
 
@@ -913,15 +921,15 @@ bool ipf_close(ipf_context_t ipf) {
     lruc_destroy(ipf->cache);
 
     //sgx_thread_mutex_destroy(&mutex);
-    memset(ipf, 0, sizeof(ipf_context_t));
+    memset(ipf, 0, sizeof(pf_context));
     cb_free(ipf);
 
     return retval;
 }
 
-bool ipf_pre_close(ipf_context_t ipf/*, pf_key_t* key, bool import*/) {
+bool ipf_pre_close(pf_context_t ipf/*, pf_key_t* key, bool import*/) {
     bool retval = true;
-    //ipf_status_t status;
+    //pf_status_t status;
 
     //sgx_thread_mutex_lock(&mutex);
 
@@ -933,7 +941,7 @@ bool ipf_pre_close(ipf_context_t ipf/*, pf_key_t* key, bool import*/) {
         //    need_writing = true; // will re-encrypt the neta-data node with local key
     }*/
 
-    if (ipf->file_status != IPF_STATUS_OK) {
+    if (ipf->file_status != PF_STATUS_SUCCESS) {
         //sgx_thread_mutex_unlock(&mutex);
         ipf_clear_error(ipf); // last attempt to fix it
         //sgx_thread_mutex_lock(&mutex);
@@ -941,7 +949,7 @@ bool ipf_pre_close(ipf_context_t ipf/*, pf_key_t* key, bool import*/) {
         ipf_internal_flush(ipf, /*false,*/ true);
     }
 
-    if (ipf->file_status != IPF_STATUS_OK)
+    if (ipf->file_status != PF_STATUS_SUCCESS)
         retval = false;
 
     /* this is done by PAL handler
@@ -977,7 +985,7 @@ bool ipf_pre_close(ipf_context_t ipf/*, pf_key_t* key, bool import*/) {
         }
     }*/
 
-    ipf->file_status = IPF_STATUS_CLOSED;
+    ipf->file_status = PF_STATUS_UNINITIALIZED;
 
     //sgx_thread_mutex_unlock(&mutex);
 
@@ -986,7 +994,7 @@ bool ipf_pre_close(ipf_context_t ipf/*, pf_key_t* key, bool import*/) {
 
 // file_flush.cpp
 
-bool ipf_flush(ipf_context_t ipf/*, bool mc*/) {
+bool ipf_flush(pf_context_t ipf/*, bool mc*/) {
     bool result = false;
 
 /*    int32_t result32 = sgx_thread_mutex_lock(&mutex);
@@ -997,17 +1005,17 @@ bool ipf_flush(ipf_context_t ipf/*, bool mc*/) {
         return false;
     }*/
 
-    if (ipf->file_status != IPF_STATUS_OK) {
-        ipf_last_error = IPF_STATUS_UNEXPECTED_ERROR;
+    if (ipf->file_status != PF_STATUS_SUCCESS) {
+        ipf_last_error = PF_STATUS_UNKNOWN_ERROR;
         //sgx_thread_mutex_unlock(&mutex);
         return false;
     }
 
     result = ipf_internal_flush(ipf, /*mc,*/ true);
     if (!result) {
-        assert(ipf->file_status != IPF_STATUS_OK);
-        if (ipf->file_status == IPF_STATUS_OK)
-            ipf->file_status = IPF_STATUS_FLUSH_ERROR; // for release set this anyway
+        assert(ipf->file_status != PF_STATUS_SUCCESS);
+        if (ipf->file_status == PF_STATUS_SUCCESS)
+            ipf->file_status = PF_STATUS_FLUSH_ERROR; // for release set this anyway
     }
 
     //sgx_thread_mutex_unlock(&mutex);
@@ -1018,7 +1026,7 @@ bool ipf_flush(ipf_context_t ipf/*, bool mc*/) {
 // DEBUG
 #define _RECOVERY_HOOK_(_x) (0)
 
-bool ipf_internal_flush(ipf_context_t ipf, /*bool mc,*/ bool flush_to_disk) {
+bool ipf_internal_flush(pf_context_t ipf, /*bool mc,*/ bool flush_to_disk) {
     if (!ipf->need_writing) // no changes at all
         return true;
 
@@ -1032,19 +1040,19 @@ bool ipf_internal_flush(ipf_context_t ipf, /*bool mc,*/ bool flush_to_disk) {
     if (ipf->encrypted_part_plain.size > MD_USER_DATA_SIZE && ipf->root_mht.need_writing) {
         // otherwise it's just one write - the meta-data node
         if (_RECOVERY_HOOK_(0) || !ipf_write_recovery_file(ipf)) {
-            ipf->file_status = IPF_STATUS_FLUSH_ERROR;
+            ipf->file_status = PF_STATUS_FLUSH_ERROR;
             return false;
         }
 
         if (_RECOVERY_HOOK_(1) || !ipf_set_update_flag(ipf, flush_to_disk)) {
-            ipf->file_status = IPF_STATUS_FLUSH_ERROR;
+            ipf->file_status = PF_STATUS_FLUSH_ERROR;
             return false;
         }
 
         if (_RECOVERY_HOOK_(2) || !ipf_update_all_data_and_mht_nodes(ipf)) {
             ipf_clear_update_flag(ipf);
             // this is something that shouldn't happen, can't fix this...
-            ipf->file_status = IPF_STATUS_CRYPTO_ERROR;
+            ipf->file_status = PF_STATUS_CRYPTO_ERROR;
             return false;
         }
     }
@@ -1076,7 +1084,7 @@ bool ipf_internal_flush(ipf_context_t ipf, /*bool mc,*/ bool flush_to_disk) {
             encrypted_part_plain.mc_value--; // don't have to do this as the file cannot be fixed, but doing it anyway to prevent future errors
         */
         // this is something that shouldn't happen, can't fix this...
-        ipf->file_status = IPF_STATUS_CRYPTO_ERROR;
+        ipf->file_status = PF_STATUS_CRYPTO_ERROR;
         return false;
     }
 
@@ -1084,7 +1092,7 @@ bool ipf_internal_flush(ipf_context_t ipf, /*bool mc,*/ bool flush_to_disk) {
     {
         //if (mc == false)
             // special case, need only to repeat write_all_changes_to_disk in order to repair it
-            ipf->file_status = IPF_STATUS_WRITE_TO_DISK_FAILED;
+            ipf->file_status = PF_STATUS_WRITE_TO_DISK_FAILED;
         //else
             //file_status = SGX_FILE_STATUS_WRITE_TO_DISK_FAILED_NEED_MC; // special case, need to repeat write_all_changes_to_disk AND increase the monotonic counter in order to repair it
 
@@ -1118,12 +1126,16 @@ bool ipf_internal_flush(ipf_context_t ipf, /*bool mc,*/ bool flush_to_disk) {
     return true;
 }
 
-bool ipf_write_recovery_file(ipf_context_t ipf) {
+bool ipf_write_recovery_file(pf_context_t ipf) {
     pf_handle_t recovery_file = NULL;
-    ipf_status_t status;
 
-    status = cb_open(ipf->recovery_filename, PF_FILE_MODE_WRITE, &recovery_file, NULL);
-    if (status != IPF_STATUS_OK || recovery_file == NULL) {
+    if (!ipf->recovery_filename) {
+        ipf_last_error = PF_STATUS_RECOVERY_IMPOSSIBLE;
+        return false;
+    }
+
+    pf_status_t status = cb_open(ipf->recovery_filename, PF_FILE_MODE_WRITE, &recovery_file, NULL);
+    if (status != PF_STATUS_SUCCESS || recovery_file == NULL) {
         ipf_last_error = status;
         return false;
     }
@@ -1180,8 +1192,8 @@ bool ipf_write_recovery_file(ipf_context_t ipf) {
     return true;
 }
 
-bool ipf_set_update_flag(ipf_context_t ipf, bool flush_to_disk) {
-    ipf_status_t status;
+bool ipf_set_update_flag(pf_context_t ipf, bool flush_to_disk) {
+    pf_status_t status;
 
     ipf->file_meta_data.plain_part.update_flag = 1;
     // turn it off in memory. at the end of the flush, when we'll write the meta-data to disk, this flag will also be cleared there.
@@ -1192,7 +1204,7 @@ bool ipf_set_update_flag(ipf_context_t ipf, bool flush_to_disk) {
 
     if (flush_to_disk) {
         status = cb_flush(ipf->file);
-        if (status != IPF_STATUS_OK) {
+        if (status != PF_STATUS_SUCCESS) {
             ipf_last_error = status;
             // try to clear the update flag, in the OS cache at least...
             ipf_write_node(ipf->file, 0, (uint8_t*)&ipf->file_meta_data, NODE_SIZE);
@@ -1203,7 +1215,7 @@ bool ipf_set_update_flag(ipf_context_t ipf, bool flush_to_disk) {
     return true;
 }
 
-void ipf_clear_update_flag(ipf_context_t ipf) {
+void ipf_clear_update_flag(pf_context_t ipf) {
     if (_RECOVERY_HOOK_(3))
         return;
     assert(ipf->file_meta_data.plain_part.update_flag == 0);
@@ -1259,10 +1271,10 @@ bool mht_sort(const void* first, const void* second) {
         }                                                                               \
     } while (0)
 
-bool ipf_update_all_data_and_mht_nodes(ipf_context_t ipf) {
+bool ipf_update_all_data_and_mht_nodes(pf_context_t ipf) {
     LISTP_TYPE(_file_mht_node) mht_list = LISTP_INIT;
     file_mht_node_t* file_mht_node;
-    ipf_status_t status;
+    pf_status_t status;
     void* data = lruc_get_first(ipf->cache);
 
     // 1. encrypt the changed data
@@ -1280,13 +1292,12 @@ bool ipf_update_all_data_and_mht_nodes(ipf_context_t ipf) {
                 gcm_crypto_data_t* gcm_crypto_data = &data_node->parent->plain.data_nodes_crypto[data_node->data_node_number % ATTACHED_DATA_NODES_COUNT];
 
                 // encrypt the data, this also saves the gmac of the operation in the mht crypto node
-                status = cb_crypto_aes_gcm_encrypt((const uint8_t*)&ipf->cur_key, sizeof(ipf->cur_key),
-                                                   (const uint8_t*)&ipf->empty_iv, sizeof(ipf->empty_iv),
+                status = cb_crypto_aes_gcm_encrypt(&ipf->cur_key, &empty_iv,
                                                    NULL, 0, // aad
                                                    data_node->plain.data, NODE_SIZE,
                                                    data_node->encrypted.cipher,
-                                                   (uint8_t*)&gcm_crypto_data->gmac, sizeof(gcm_crypto_data->gmac));
-                if (status != IPF_STATUS_OK) {
+                                                   &gcm_crypto_data->gmac);
+                if (status != PF_STATUS_SUCCESS) {
                     ipf_last_error = status;
                     return false;
                 }
@@ -1320,8 +1331,8 @@ bool ipf_update_all_data_and_mht_nodes(ipf_context_t ipf) {
         data = lruc_get_next(ipf->cache);
     }
 
-	// sort the list from the last node to the first (bottom layers first)
-	LISTP_SORT(&mht_list, _file_mht_node, mht_sort);
+    // sort the list from the last node to the first (bottom layers first)
+    LISTP_SORT(&mht_list, _file_mht_node, mht_sort);
 
     // update the gmacs in the parents
     struct _file_mht_node* node;
@@ -1337,13 +1348,12 @@ bool ipf_update_all_data_and_mht_nodes(ipf_context_t ipf) {
             return false;
         }
 
-        status = cb_crypto_aes_gcm_encrypt((const uint8_t*)&ipf->cur_key, sizeof(ipf->cur_key),
-                                           (const uint8_t*)&ipf->empty_iv, sizeof(ipf->empty_iv),
+        status = cb_crypto_aes_gcm_encrypt(&ipf->cur_key, &empty_iv,
                                            NULL, 0,
                                            &file_mht_node->plain, NODE_SIZE,
                                            &file_mht_node->encrypted.cipher,
-                                           (uint8_t*)&gcm_crypto_data->gmac, sizeof(gcm_crypto_data->gmac));
-        if (status != IPF_STATUS_OK) {
+                                           &gcm_crypto_data->gmac);
+        if (status != PF_STATUS_SUCCESS) {
             //mht_list.clear(); // not needed
             ipf_last_error = status;
             return false;
@@ -1360,13 +1370,12 @@ bool ipf_update_all_data_and_mht_nodes(ipf_context_t ipf) {
     if (!ipf_derive_random_node_key(ipf, ipf->root_mht.physical_node_number))
         return false;
 
-    status = cb_crypto_aes_gcm_encrypt((const uint8_t*)&ipf->cur_key, sizeof(ipf->cur_key),
-                                       (const uint8_t*)&ipf->empty_iv, sizeof(ipf->empty_iv),
+    status = cb_crypto_aes_gcm_encrypt(&ipf->cur_key, &empty_iv,
                                        NULL, 0,
                                        &ipf->root_mht.plain, NODE_SIZE,
                                        &ipf->root_mht.encrypted.cipher,
-                                       (uint8_t*)&ipf->encrypted_part_plain.mht_gmac, sizeof(ipf->encrypted_part_plain.mht_gmac));
-    if (status != IPF_STATUS_OK) {
+                                       &ipf->encrypted_part_plain.mht_gmac);
+    if (status != PF_STATUS_SUCCESS) {
         ipf_last_error = status;
         return false;
     }
@@ -1377,8 +1386,8 @@ bool ipf_update_all_data_and_mht_nodes(ipf_context_t ipf) {
     return true;
 }
 
-bool ipf_update_meta_data_node(ipf_context_t ipf) {
-    ipf_status_t status;
+bool ipf_update_meta_data_node(pf_context_t ipf) {
+    pf_status_t status;
 
     // randomize a new key, saves the key _id_ in the meta data plain part
     if (!ipf_generate_random_meta_data_key(ipf)) {
@@ -1387,13 +1396,12 @@ bool ipf_update_meta_data_node(ipf_context_t ipf) {
     }
 
     // encrypt meta data encrypted part, also updates the gmac in the meta data plain part
-    status = cb_crypto_aes_gcm_encrypt((const uint8_t*)&ipf->cur_key, sizeof(ipf->cur_key),
-                                       (const uint8_t*)&ipf->empty_iv, sizeof(ipf->empty_iv),
+    status = cb_crypto_aes_gcm_encrypt(&ipf->cur_key, &empty_iv,
                                        NULL, 0,
                                        &ipf->encrypted_part_plain, sizeof(meta_data_encrypted_t),
                                        &ipf->file_meta_data.encrypted_part,
-                                       (uint8_t*)&ipf->file_meta_data.plain_part.meta_data_gmac, sizeof(ipf->file_meta_data.plain_part.meta_data_gmac));
-    if (status != IPF_STATUS_OK) {
+                                       &ipf->file_meta_data.plain_part.meta_data_gmac);
+    if (status != PF_STATUS_SUCCESS) {
         ipf_last_error = status;
         return false;
     }
@@ -1401,8 +1409,8 @@ bool ipf_update_meta_data_node(ipf_context_t ipf) {
     return true;
 }
 
-bool ipf_write_all_changes_to_disk(ipf_context_t ipf, bool flush_to_disk) {
-    ipf_status_t status;
+bool ipf_write_all_changes_to_disk(pf_context_t ipf, bool flush_to_disk) {
+    pf_status_t status;
 
     if (ipf->encrypted_part_plain.size > MD_USER_DATA_SIZE && ipf->root_mht.need_writing) {
         void* data = NULL;
@@ -1462,7 +1470,7 @@ bool ipf_write_all_changes_to_disk(ipf_context_t ipf, bool flush_to_disk) {
 
     if (flush_to_disk) {
         status = cb_flush(ipf->file);
-        if (status != IPF_STATUS_OK) {
+        if (status != PF_STATUS_SUCCESS) {
             ipf_last_error = status;
             return false;
         }
@@ -1471,14 +1479,19 @@ bool ipf_write_all_changes_to_disk(ipf_context_t ipf, bool flush_to_disk) {
     return true;
 }
 
-bool ipf_erase_recovery_file(ipf_context_t ipf) {
-    ipf_status_t status;
+bool ipf_erase_recovery_file(pf_context_t ipf) {
+    pf_status_t status;
+
+    if (!ipf->recovery_filename) {
+        ipf_last_error = PF_STATUS_RECOVERY_IMPOSSIBLE;
+        return false;
+    }
 
     if (ipf->recovery_filename[0] == '\0') // not initialized yet
         return true;
 
     status = cb_delete(ipf->recovery_filename);
-    if (status != IPF_STATUS_OK) {
+    if (status != PF_STATUS_SUCCESS) {
         ipf_last_error = status;
         return false;
     }
@@ -1486,10 +1499,10 @@ bool ipf_erase_recovery_file(ipf_context_t ipf) {
     return true;
 }
 
-int64_t ipf_tell(ipf_context_t ipf) {
+int64_t ipf_tell(pf_context_t ipf) {
     //sgx_thread_mutex_lock(&mutex);
 
-    if (ipf->file_status != IPF_STATUS_OK) {
+    if (ipf->file_status != PF_STATUS_SUCCESS) {
         ipf_last_error = ipf->file_status;
         //sgx_thread_mutex_unlock(&mutex);
         return -1;
@@ -1501,10 +1514,10 @@ int64_t ipf_tell(ipf_context_t ipf) {
 }
 
 // we don't support sparse files, fseek beyond the current file size will fail
-bool ipf_seek(ipf_context_t ipf, int64_t new_offset, int origin) {
+bool ipf_seek(pf_context_t ipf, int64_t new_offset, int origin) {
     //sgx_thread_mutex_lock(&mutex);
 
-    if (ipf->file_status != IPF_STATUS_OK) {
+    if (ipf->file_status != PF_STATUS_SUCCESS) {
         ipf_last_error = ipf->file_status;
         //sgx_thread_mutex_unlock(&mutex);
         return false;
@@ -1545,21 +1558,21 @@ bool ipf_seek(ipf_context_t ipf, int64_t new_offset, int origin) {
     if (result)
         ipf->end_of_file = false;
     else
-        ipf_last_error = IPF_STATUS_INVALID_PARAMETER;
+        ipf_last_error = PF_STATUS_INVALID_PARAMETER;
 
     //sgx_thread_mutex_unlock(&mutex);
 
     return result;
 }
 
-ipf_status_t ipf_get_error(ipf_context_t ipf) {
-    ipf_status_t result = IPF_STATUS_OK;
+pf_status_t ipf_get_error(pf_context_t ipf) {
+    pf_status_t result = PF_STATUS_SUCCESS;
 
     //sgx_thread_mutex_lock(&mutex);
 
-    if (ipf_last_error != IPF_STATUS_OK)
+    if (ipf_last_error != PF_STATUS_SUCCESS)
         result = ipf_last_error;
-    else if (ipf->file_status != IPF_STATUS_OK)
+    else if (ipf->file_status != PF_STATUS_SUCCESS)
         result = ipf->file_status;
 
     //sgx_thread_mutex_unlock(&mutex);
@@ -1567,32 +1580,30 @@ ipf_status_t ipf_get_error(ipf_context_t ipf) {
     return result;
 }
 
-bool ipf_get_eof(ipf_context_t ipf) {
+bool ipf_get_eof(pf_context_t ipf) {
     return ipf->end_of_file;
 }
 
-void ipf_clear_error(ipf_context_t ipf) {
+void ipf_clear_error(pf_context_t ipf) {
     //sgx_thread_mutex_lock(&mutex);
 
-    if (ipf->file_status == IPF_STATUS_NOT_INITIALIZED ||
-        ipf->file_status == IPF_STATUS_CLOSED ||
-        ipf->file_status == IPF_STATUS_CRYPTO_ERROR ||
-        ipf->file_status == IPF_STATUS_CORRUPTED ||
-        ipf->file_status == IPF_STATUS_MEMORY_CORRUPTED) {
+    if (ipf->file_status == PF_STATUS_UNINITIALIZED ||
+        ipf->file_status == PF_STATUS_CRYPTO_ERROR ||
+        ipf->file_status == PF_STATUS_CORRUPTED) {
         // can't fix these...
         //sgx_thread_mutex_unlock(&mutex);
         return;
     }
 
-    if (ipf->file_status == IPF_STATUS_FLUSH_ERROR) {
+    if (ipf->file_status == PF_STATUS_FLUSH_ERROR) {
         if (ipf_internal_flush(ipf, /*false,*/ true))
-            ipf->file_status = IPF_STATUS_OK;
+            ipf->file_status = PF_STATUS_SUCCESS;
     }
 
-    if (ipf->file_status == IPF_STATUS_WRITE_TO_DISK_FAILED) {
+    if (ipf->file_status == PF_STATUS_WRITE_TO_DISK_FAILED) {
         if (ipf_write_all_changes_to_disk(ipf, true)) {
             ipf->need_writing = false;
-            ipf->file_status = IPF_STATUS_OK;
+            ipf->file_status = PF_STATUS_SUCCESS;
         }
     }
 
@@ -1622,17 +1633,17 @@ void ipf_clear_error(ipf_context_t ipf) {
     }
 */
 
-    if (ipf->file_status == IPF_STATUS_OK) {
-        ipf_last_error = IPF_STATUS_OK;
+    if (ipf->file_status == PF_STATUS_SUCCESS) {
+        ipf_last_error = PF_STATUS_SUCCESS;
         ipf->end_of_file = false;
     }
     //sgx_thread_mutex_unlock(&mutex);
 }
 
-bool ipf_clear_cache(ipf_context_t ipf) {
+bool ipf_clear_cache(pf_context_t ipf) {
     //sgx_thread_mutex_lock(&mutex);
 
-    if (ipf->file_status != IPF_STATUS_OK) {
+    if (ipf->file_status != PF_STATUS_SUCCESS) {
         //sgx_thread_mutex_unlock(&mutex);
         ipf_clear_error(ipf); // attempt to fix the file, will also flush it
         //sgx_thread_mutex_lock(&mutex);
@@ -1640,7 +1651,7 @@ bool ipf_clear_cache(ipf_context_t ipf) {
         ipf_internal_flush(ipf, /*false,*/ true);
     }
 
-    if (ipf->file_status != IPF_STATUS_OK) {
+    if (ipf->file_status != PF_STATUS_SUCCESS) {
         // clearing the cache might lead to losing un-saved data
         //sgx_thread_mutex_unlock(&mutex);
         return false;
@@ -1677,7 +1688,7 @@ bool ipf_clear_cache(ipf_context_t ipf) {
     return true;
 }
 
-size_t ipf_write(ipf_context_t ipf, const void* ptr, size_t size, size_t count) {
+size_t ipf_write(pf_context_t ipf, const void* ptr, size_t size, size_t count) {
     if (ptr == NULL || size == 0 || count == 0)
         return 0;
 
@@ -1693,7 +1704,7 @@ size_t ipf_write(ipf_context_t ipf, const void* ptr, size_t size, size_t count) 
 
     // prevent overlap...
     if (((uint64_t)((uint64_t)size * (uint64_t)count)) != (uint64_t)data_left_to_write) {
-        ipf_last_error = IPF_STATUS_INVALID_PARAMETER;
+        ipf_last_error = PF_STATUS_INVALID_PARAMETER;
         //sgx_thread_mutex_unlock(&mutex);
         return 0;
     }
@@ -1705,20 +1716,20 @@ size_t ipf_write(ipf_context_t ipf, const void* ptr, size_t size, size_t count) 
         return 0;
     }*/
 
-    if (ipf->file_status != IPF_STATUS_OK) {
+    if (ipf->file_status != PF_STATUS_SUCCESS) {
         ipf_last_error = ipf->file_status;
         //sgx_thread_mutex_unlock(&mutex);
         return 0;
     }
 
-    if (ipf->open_mode.append == 0 && ipf->open_mode.update == 0 && ipf->open_mode.write == 0) {
-        ipf_last_error = IPF_STATUS_DENIED;
+    if (/*ipf->open_mode.append == 0 && */ipf->open_mode.update == 0 && ipf->open_mode.write == 0) {
+        ipf_last_error = PF_STATUS_INVALID_MODE;
         //sgx_thread_mutex_unlock(&mutex);
         return 0;
     }
 
-    if (ipf->open_mode.append == 1)
-        ipf->offset = ipf->encrypted_part_plain.size; // add at the end of the file
+    //if (ipf->open_mode.append == 1)
+    //    ipf->offset = ipf->encrypted_part_plain.size; // add at the end of the file
 
     const unsigned char* data_to_write = (const unsigned char*)ptr;
 
@@ -1787,7 +1798,7 @@ size_t ipf_write(ipf_context_t ipf, const void* ptr, size_t size, size_t count) 
     return ret_count;
 }
 
-size_t ipf_read(ipf_context_t ipf, void* ptr, size_t size, size_t count) {
+size_t ipf_read(pf_context_t ipf, void* ptr, size_t size, size_t count) {
     if (ptr == NULL || size == 0 || count == 0)
         return 0;
 
@@ -1803,7 +1814,7 @@ size_t ipf_read(ipf_context_t ipf, void* ptr, size_t size, size_t count) {
 
     // prevent overlap...
     if (((uint64_t)((uint64_t)size * (uint64_t)count)) != (uint64_t)data_left_to_read) {
-        ipf_last_error = IPF_STATUS_INVALID_PARAMETER;
+        ipf_last_error = PF_STATUS_INVALID_PARAMETER;
         //sgx_thread_mutex_unlock(&mutex);
         return 0;
     }
@@ -1815,14 +1826,14 @@ size_t ipf_read(ipf_context_t ipf, void* ptr, size_t size, size_t count) {
         return 0;
     }*/
 
-    if (ipf->file_status != IPF_STATUS_OK) {
+    if (ipf->file_status != PF_STATUS_SUCCESS) {
         ipf_last_error = ipf->file_status;
         //sgx_thread_mutex_unlock(&mutex);
         return 0;
     }
 
     if (ipf->open_mode.read == 0 && ipf->open_mode.update == 0) {
-        ipf_last_error = IPF_STATUS_DENIED;
+        ipf_last_error = PF_STATUS_INVALID_MODE;
         //sgx_thread_mutex_unlock(&mutex);
         return 0;
     }
@@ -1935,11 +1946,11 @@ void get_node_numbers(uint64_t offset, uint64_t* mht_node_number, uint64_t* data
         *physical_data_node_number = _physical_data_node_number;
 }
 
-file_data_node_t* ipf_get_data_node(ipf_context_t ipf) {
+file_data_node_t* ipf_get_data_node(pf_context_t ipf) {
     file_data_node_t* file_data_node = NULL;
 
     if (ipf->offset < MD_USER_DATA_SIZE) {
-        ipf_last_error = IPF_STATUS_UNEXPECTED_ERROR;
+        ipf_last_error = PF_STATUS_UNKNOWN_ERROR;
         return NULL;
     }
 
@@ -1966,7 +1977,7 @@ file_data_node_t* ipf_get_data_node(ipf_context_t ipf) {
         assert(data != NULL);
         // for production -
         if (data == NULL) {
-            ipf_last_error = IPF_STATUS_UNEXPECTED_ERROR;
+            ipf_last_error = PF_STATUS_UNKNOWN_ERROR;
             return NULL;
         }
 
@@ -1988,9 +1999,9 @@ file_data_node_t* ipf_get_data_node(ipf_context_t ipf) {
         } else {
             if (!ipf_internal_flush(ipf, /*false,*/ false)) {
                 // error, can't flush cache, file status changed to error
-                assert(ipf->file_status != IPF_STATUS_OK);
-                if (ipf->file_status == IPF_STATUS_OK)
-                    ipf->file_status = IPF_STATUS_FLUSH_ERROR; // for release set this anyway
+                assert(ipf->file_status != PF_STATUS_SUCCESS);
+                if (ipf->file_status == PF_STATUS_SUCCESS)
+                    ipf->file_status = PF_STATUS_FLUSH_ERROR; // for release set this anyway
                 return NULL; // even if we got the data_node!
             }
         }
@@ -1999,7 +2010,7 @@ file_data_node_t* ipf_get_data_node(ipf_context_t ipf) {
     return file_data_node;
 }
 
-file_data_node_t* ipf_append_data_node(ipf_context_t ipf) {
+file_data_node_t* ipf_append_data_node(pf_context_t ipf) {
     file_mht_node_t* file_mht_node = ipf_get_mht_node(ipf);
     if (file_mht_node == NULL) // some error happened
         return NULL;
@@ -2008,7 +2019,7 @@ file_data_node_t* ipf_append_data_node(ipf_context_t ipf) {
 
     new_file_data_node = cb_malloc(sizeof(*new_file_data_node));
     if (!new_file_data_node) {
-        ipf_last_error = IPF_STATUS_NO_MEMORY;
+        ipf_last_error = PF_STATUS_NO_MEMORY;
         return NULL;
     }
     memset(new_file_data_node, 0, sizeof(*new_file_data_node));
@@ -2021,18 +2032,18 @@ file_data_node_t* ipf_append_data_node(ipf_context_t ipf) {
 
     if (!lruc_add(ipf->cache, new_file_data_node->physical_node_number, new_file_data_node)) {
         cb_free(new_file_data_node);
-        ipf_last_error = IPF_STATUS_NO_MEMORY;
+        ipf_last_error = PF_STATUS_NO_MEMORY;
         return NULL;
     }
 
     return new_file_data_node;
 }
 
-file_data_node_t* ipf_read_data_node(ipf_context_t ipf) {
+file_data_node_t* ipf_read_data_node(pf_context_t ipf) {
     uint64_t data_node_number;
     uint64_t physical_node_number;
     file_mht_node_t* file_mht_node;
-    ipf_status_t status;
+    pf_status_t status;
 
     get_node_numbers(ipf->offset, NULL, &data_node_number, NULL, &physical_node_number);
 
@@ -2048,7 +2059,7 @@ file_data_node_t* ipf_read_data_node(ipf_context_t ipf) {
 
     file_data_node = cb_malloc(sizeof(*file_data_node));
     if (!file_data_node) {
-        ipf_last_error = IPF_STATUS_NO_MEMORY;
+        ipf_last_error = PF_STATUS_NO_MEMORY;
         return NULL;
     }
     memset(file_data_node, 0, sizeof(*file_data_node));
@@ -2065,18 +2076,17 @@ file_data_node_t* ipf_read_data_node(ipf_context_t ipf) {
     gcm_crypto_data_t* gcm_crypto_data = &file_data_node->parent->plain.data_nodes_crypto[file_data_node->data_node_number % ATTACHED_DATA_NODES_COUNT];
 
     // this function decrypt the data _and_ checks the integrity of the data against the gmac
-    status = cb_crypto_aes_gcm_decrypt((const uint8_t*)&gcm_crypto_data->key, sizeof(gcm_crypto_data->key),
-                                       (const uint8_t*)&ipf->empty_iv, sizeof(ipf->empty_iv),
+    status = cb_crypto_aes_gcm_decrypt(&gcm_crypto_data->key, &empty_iv,
                                        NULL, 0,
                                        file_data_node->encrypted.cipher, NODE_SIZE,
                                        file_data_node->plain.data,
-                                       (const uint8_t*)&gcm_crypto_data->gmac, sizeof(gcm_crypto_data->gmac));
+                                       &gcm_crypto_data->gmac);
 
-    if (status != IPF_STATUS_OK) {
+    if (status != PF_STATUS_SUCCESS) {
         cb_free(file_data_node);
         ipf_last_error = status;
-        if (status == IPF_STATUS_MAC_MISMATCH)
-            ipf->file_status = IPF_STATUS_CORRUPTED;
+        if (status == PF_STATUS_MAC_MISMATCH)
+            ipf->file_status = PF_STATUS_CORRUPTED;
         return NULL;
     }
 
@@ -2084,20 +2094,20 @@ file_data_node_t* ipf_read_data_node(ipf_context_t ipf) {
         // scrub the plaintext data
         memset(&file_data_node->plain, 0, sizeof(file_data_node->plain)); // TODO: memset_s
         cb_free(file_data_node);
-        ipf_last_error = IPF_STATUS_NO_MEMORY;
+        ipf_last_error = PF_STATUS_NO_MEMORY;
         return NULL;
     }
 
     return file_data_node;
 }
 
-file_mht_node_t* ipf_get_mht_node(ipf_context_t ipf) {
+file_mht_node_t* ipf_get_mht_node(pf_context_t ipf) {
     file_mht_node_t* file_mht_node;
     uint64_t mht_node_number;
     uint64_t physical_mht_node_number;
 
     if (ipf->offset < MD_USER_DATA_SIZE) {
-        ipf_last_error = IPF_STATUS_UNEXPECTED_ERROR;
+        ipf_last_error = PF_STATUS_UNKNOWN_ERROR;
         return NULL;
     }
 
@@ -2117,7 +2127,7 @@ file_mht_node_t* ipf_get_mht_node(ipf_context_t ipf) {
     return file_mht_node;
 }
 
-file_mht_node_t* ipf_append_mht_node(ipf_context_t ipf, uint64_t mht_node_number) {
+file_mht_node_t* ipf_append_mht_node(pf_context_t ipf, uint64_t mht_node_number) {
     file_mht_node_t* parent_file_mht_node = ipf_read_mht_node(ipf, (mht_node_number - 1) / CHILD_MHT_NODES_COUNT);
     if (parent_file_mht_node == NULL) // some error happened
         return NULL;
@@ -2128,7 +2138,7 @@ file_mht_node_t* ipf_append_mht_node(ipf_context_t ipf, uint64_t mht_node_number
     file_mht_node_t* new_file_mht_node = NULL;
     new_file_mht_node = cb_malloc(sizeof(*new_file_mht_node));
     if (!new_file_mht_node) {
-        ipf_last_error = IPF_STATUS_NO_MEMORY;
+        ipf_last_error = PF_STATUS_NO_MEMORY;
         return NULL;
     }
     memset(new_file_mht_node, 0, sizeof(*new_file_mht_node));
@@ -2141,15 +2151,15 @@ file_mht_node_t* ipf_append_mht_node(ipf_context_t ipf, uint64_t mht_node_number
 
     if (!lruc_add(ipf->cache, new_file_mht_node->physical_node_number, new_file_mht_node)) {
         cb_free(new_file_mht_node);
-        ipf_last_error = IPF_STATUS_NO_MEMORY;
+        ipf_last_error = PF_STATUS_NO_MEMORY;
         return NULL;
     }
 
     return new_file_mht_node;
 }
 
-file_mht_node_t* ipf_read_mht_node(ipf_context_t ipf, uint64_t mht_node_number) {
-    ipf_status_t status;
+file_mht_node_t* ipf_read_mht_node(pf_context_t ipf, uint64_t mht_node_number) {
+    pf_status_t status;
 
     if (mht_node_number == 0)
         return &ipf->root_mht;
@@ -2167,7 +2177,7 @@ file_mht_node_t* ipf_read_mht_node(ipf_context_t ipf, uint64_t mht_node_number) 
 
     file_mht_node = cb_malloc(sizeof(*file_mht_node));
     if (!file_mht_node) {
-        ipf_last_error = IPF_STATUS_NO_MEMORY;
+        ipf_last_error = PF_STATUS_NO_MEMORY;
         return NULL;
     }
 
@@ -2185,24 +2195,23 @@ file_mht_node_t* ipf_read_mht_node(ipf_context_t ipf, uint64_t mht_node_number) 
     gcm_crypto_data_t* gcm_crypto_data = &file_mht_node->parent->plain.mht_nodes_crypto[(file_mht_node->mht_node_number - 1) % CHILD_MHT_NODES_COUNT];
 
     // this function decrypt the data _and_ checks the integrity of the data against the gmac
-    status = cb_crypto_aes_gcm_decrypt((const uint8_t*)&gcm_crypto_data->key, sizeof(gcm_crypto_data->key),
-                                       (const uint8_t*)ipf->empty_iv, sizeof(ipf->empty_iv),
+    status = cb_crypto_aes_gcm_decrypt(&gcm_crypto_data->key, &empty_iv,
                                        NULL, 0,
                                        file_mht_node->encrypted.cipher, NODE_SIZE,
                                        &file_mht_node->plain,
-                                       (const uint8_t*)&gcm_crypto_data->gmac, sizeof(gcm_crypto_data->gmac));
-    if (status != IPF_STATUS_OK) {
+                                       &gcm_crypto_data->gmac);
+    if (status != PF_STATUS_SUCCESS) {
         cb_free(file_mht_node);
         ipf_last_error = status;
-        if (status == IPF_STATUS_MAC_MISMATCH)
-            ipf->file_status = IPF_STATUS_CORRUPTED;
+        if (status == PF_STATUS_MAC_MISMATCH)
+            ipf->file_status = PF_STATUS_CORRUPTED;
         return NULL;
     }
 
     if (!lruc_add(ipf->cache, file_mht_node->physical_node_number, file_mht_node)) {
         memset(&file_mht_node->plain, 0, sizeof(file_mht_node->plain)); // todo: memset_s
         cb_free(file_mht_node);
-        ipf_last_error = IPF_STATUS_NO_MEMORY;
+        ipf_last_error = PF_STATUS_NO_MEMORY;
         return NULL;
     }
 
@@ -2221,22 +2230,24 @@ bool ipf_do_file_recovery(const char* filename, const char* recovery_filename, u
 
     do {
         if (filename == NULL || strnlen(filename, 1) == 0) {
+            ipf_last_error = PF_STATUS_RECOVERY_IMPOSSIBLE;
             return false;
         }
 
         if (recovery_filename == NULL || strnlen(recovery_filename, 1) == 0) {
+            ipf_last_error = PF_STATUS_RECOVERY_IMPOSSIBLE;
             return false;
         }
 
-        ipf_status_t status = cb_open(recovery_filename, PF_FILE_MODE_READ, &recovery_file, &file_size);
-        if (status != IPF_STATUS_OK){
+        pf_status_t status = cb_open(recovery_filename, PF_FILE_MODE_READ, &recovery_file, &file_size);
+        if (status != PF_STATUS_SUCCESS){
             ipf_last_error = status;
             break;
         }
 
         if (file_size % recovery_node_size != 0) {
             // corrupted recovery file
-            ipf_last_error = IPF_STATUS_CORRUPTED;
+            ipf_last_error = PF_STATUS_CORRUPTED;
             break;
         }
 
@@ -2244,12 +2255,12 @@ bool ipf_do_file_recovery(const char* filename, const char* recovery_filename, u
 
         recovery_node = (uint8_t*)cb_malloc(recovery_node_size);
         if (recovery_node == NULL) {
-            ipf_last_error = IPF_STATUS_NO_MEMORY;
+            ipf_last_error = PF_STATUS_NO_MEMORY;
             break;
         }
 
         status = cb_open(filename, PF_FILE_MODE_READ|PF_FILE_MODE_WRITE, &source_file, NULL);
-        if (status != IPF_STATUS_OK){
+        if (status != PF_STATUS_SUCCESS){
             ipf_last_error = status;
             break;
         }
@@ -2292,7 +2303,7 @@ bool ipf_do_file_recovery(const char* filename, const char* recovery_filename, u
             break;
 
         status = cb_flush(source_file);
-        if (status != IPF_STATUS_OK) {
+        if (status != PF_STATUS_SUCCESS) {
             ipf_last_error = status;
             break;
         }
@@ -2309,4 +2320,52 @@ bool ipf_do_file_recovery(const char* filename, const char* recovery_filename, u
         cb_delete(recovery_filename);
 
     return ret;
+}
+
+// public API
+
+pf_status_t pf_open(pf_handle_t handle, const char* path, size_t underlying_size, pf_file_mode_t mode,
+                    bool create, const pf_key_t* key, pf_context_t* context) {
+    open_mode_t om = {0};
+    om.read = mode & PF_FILE_MODE_READ;
+    om.write = mode & PF_FILE_MODE_WRITE;
+    om.update = !create;
+    *context = ipf_open(path, om, handle, underlying_size, key);
+    if (*context)
+        return PF_STATUS_SUCCESS;
+    return ipf_last_error;
+}
+
+pf_status_t pf_close(pf_context_t pf) {
+    if (ipf_close(pf))
+        return PF_STATUS_SUCCESS;
+    return ipf_last_error;
+}
+
+pf_status_t pf_get_size(pf_context_t pf, size_t* size) {
+    *size = pf->encrypted_part_plain.size;
+    return PF_STATUS_SUCCESS;
+}
+
+// TODO: just write zeros at the end for extending, shrinking may be harder
+pf_status_t pf_set_size(pf_context_t pf, size_t size) {
+    __UNUSED(pf);
+    __UNUSED(size);
+    return PF_STATUS_NOT_IMPLEMENTED;
+}
+
+pf_status_t pf_read(pf_context_t pf, uint64_t offset, size_t size, void* output) {
+    if (!ipf_seek(pf, offset, SEEK_SET))
+        return ipf_last_error;
+    if (!ipf_read(pf, output, 1, size))
+        return ipf_last_error;
+    return PF_STATUS_SUCCESS;
+}
+
+pf_status_t pf_write(pf_context_t pf, uint64_t offset, size_t size, const void* input) {
+    if (!ipf_seek(pf, offset, SEEK_SET))
+        return ipf_last_error;
+    if (!ipf_write(pf, input, 1, size))
+        return ipf_last_error;
+    return PF_STATUS_SUCCESS;
 }

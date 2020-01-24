@@ -80,8 +80,42 @@ static pf_status_t cb_truncate(pf_handle_t handle, size_t size) {
     return PF_STATUS_SUCCESS;
 }
 
-static pf_status_t cb_flush(__attribute__((unused)) pf_handle_t handle) {
+static pf_status_t cb_flush(pf_handle_t handle) {
+    int fd  = *(int*)handle;
+    int ret = ocall_fsync(fd);
+    if (IS_ERR(ret)) {
+        SGX_DBG(DBG_E, "cb_flush(%d): ocall failed: %d\n", fd, ret);
+        return PF_STATUS_CALLBACK_FAILED;
+    }
+    return PF_STATUS_SUCCESS;
+}
+
+static pf_status_t cb_open(const char* path, pf_file_mode_t mode, pf_handle_t* handle, size_t* size) {
+    // TODO
+    __UNUSED(path);
+    __UNUSED(mode);
+    __UNUSED(handle);
+    __UNUSED(size);
     return PF_STATUS_NOT_IMPLEMENTED;
+}
+
+static pf_status_t cb_close(pf_handle_t handle) {
+    int fd  = *(int*)handle;
+    int ret = ocall_close(fd);
+    if (IS_ERR(ret)) {
+        SGX_DBG(DBG_E, "cb_close(%d): ocall failed: %d\n", fd, ret);
+        return PF_STATUS_CALLBACK_FAILED;
+    }
+    return PF_STATUS_SUCCESS;
+}
+
+static pf_status_t cb_delete(const char* path) {
+    int ret = ocall_delete(path);
+    if (IS_ERR(ret)) {
+        SGX_DBG(DBG_E, "cb_delete(%s): ocall failed: %d\n", path, ret);
+        return PF_STATUS_CALLBACK_FAILED;
+    }
+    return PF_STATUS_SUCCESS;
 }
 
 #ifdef DEBUG
@@ -90,15 +124,12 @@ static void cb_debug(const char* msg) {
 }
 #endif
 
-static pf_status_t cb_crypto_aes_gcm_encrypt(const uint8_t* key, size_t key_size, const uint8_t* iv,
-                                             size_t iv_size, const void* aad, size_t aad_size,
+static pf_status_t cb_crypto_aes_gcm_encrypt(const pf_key_t* key, const pf_iv_t* iv,
+                                             const void* aad, size_t aad_size,
                                              const void* input, size_t input_size, void* output,
-                                             uint8_t* mac, size_t mac_size) {
-    if (iv_size != PF_IV_SIZE)
-        return PF_STATUS_INVALID_PARAMETER;
-
-    int ret = lib_AESGCMEncrypt(key, key_size, iv, input, input_size, aad, aad_size, output, mac,
-                                mac_size);
+                                             pf_mac_t* mac) {
+    int ret = lib_AESGCMEncrypt((const uint8_t*)key, sizeof(*key), (const uint8_t*)iv, input,
+                                input_size, aad, aad_size, output, (uint8_t*)mac, sizeof(*mac));
     if (ret != 0) {
         SGX_DBG(DBG_E, "lib_AESGCMEncrypt failed: %d\n", ret);
         return PF_STATUS_CALLBACK_FAILED;
@@ -106,15 +137,12 @@ static pf_status_t cb_crypto_aes_gcm_encrypt(const uint8_t* key, size_t key_size
     return PF_STATUS_SUCCESS;
 }
 
-static pf_status_t cb_crypto_aes_gcm_decrypt(const uint8_t* key, size_t key_size, const uint8_t* iv,
-                                             size_t iv_size, const void* aad, size_t aad_size,
+static pf_status_t cb_crypto_aes_gcm_decrypt(const pf_key_t* key, const pf_iv_t* iv,
+                                             const void* aad, size_t aad_size,
                                              const void* input, size_t input_size, void* output,
-                                             const uint8_t* mac, size_t mac_size) {
-    if (iv_size != PF_IV_SIZE)
-        return PF_STATUS_INVALID_PARAMETER;
-
-    int ret = lib_AESGCMDecrypt(key, key_size, iv, input, input_size, aad, aad_size, output, mac,
-                                mac_size);
+                                             const pf_mac_t* mac) {
+    int ret = lib_AESGCMDecrypt((const uint8_t*)key, sizeof(*key), (const uint8_t*)iv, input,
+                                input_size, aad, aad_size, output, (const uint8_t*)mac, sizeof(*mac));
     if (ret != 0) {
         SGX_DBG(DBG_E, "lib_AESGCMDecrypt failed: %d\n", ret);
         return PF_STATUS_CALLBACK_FAILED;
@@ -133,7 +161,7 @@ static pf_status_t cb_crypto_random(uint8_t* buffer, size_t size) {
 
 /* Wrap key for protected files.
    TODO: In the future, this key should be provisioned after local/remote attestation. */
-static uint8_t g_pf_wrap_key[PF_WRAP_KEY_SIZE] = {0};
+static pf_key_t g_pf_wrap_key = {0};
 
 static LISTP_TYPE(protected_file) protected_file_list = LISTP_INIT;
 static LISTP_TYPE(protected_file) protected_dir_list = LISTP_INIT;
@@ -422,7 +450,8 @@ out:
 
 /* Initialize the PF library, register PFs from the manifest */
 int init_protected_files() {
-    pf_set_callbacks(cb_malloc, free, cb_map, cb_unmap, cb_truncate, cb_flush,
+    pf_set_callbacks(cb_malloc, free, cb_map, cb_unmap, cb_truncate, cb_flush, cb_open, cb_close,
+                     cb_delete,
 #ifdef DEBUG
                      cb_debug
 #else
@@ -430,12 +459,13 @@ int init_protected_files() {
 #endif
                      );
 
-    pf_set_crypto_callbacks(cb_crypto_aes_gcm_encrypt, cb_crypto_aes_gcm_decrypt, cb_crypto_random);
+    pf_set_crypto_callbacks(cb_crypto_aes_gcm_encrypt, cb_crypto_aes_gcm_decrypt,
+                            cb_crypto_random);
 
     /* TODO: development only: get SECRET WRAP KEY FOR PROTECTED FILES from manifest
        In the future, this key should be provisioned after local/remote attestation. */
 
-    char key_hex[PF_WRAP_KEY_SIZE * 2 + 1];
+    char key_hex[PF_KEY_SIZE * 2 + 1];
     ssize_t len = get_config(pal_state.root_config, "sgx.protected_files_key", key_hex,
                              sizeof(key_hex));
     if (len <= 0) {
@@ -470,7 +500,7 @@ int init_protected_files() {
 static int open_protected_file(const char* path, struct protected_file* pf, pf_handle_t handle,
                                size_t size, pf_file_mode_t mode, bool create) {
     pf_status_t pfs;
-
+/* // old implementation
     if (!create) {
         pfs = pf_open(handle, size, mode, g_pf_wrap_key, &pf->context);
     } else {
@@ -488,9 +518,10 @@ static int open_protected_file(const char* path, struct protected_file* pf, pf_h
 
         pfs = pf_create(handle, prefix, name, g_pf_wrap_key, &pf->context);
     }
-
+*/
+    pfs = pf_open(handle, path, size, mode, create, &g_pf_wrap_key, &pf->context);
     if (PF_FAILURE(pfs)) {
-        SGX_DBG(DBG_E, "pf_open/pf_create(%d) failed: %d\n", *(int*)handle, pfs);
+        SGX_DBG(DBG_E, "pf_open(%d, %s) failed: %d\n", *(int*)handle, path, pfs);
         return -PAL_ERROR_DENIED;
     }
     return 0;
