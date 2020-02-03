@@ -521,26 +521,8 @@ int init_protected_files() {
 static int open_protected_file(const char* path, struct protected_file* pf, pf_handle_t handle,
                                size_t size, pf_file_mode_t mode, bool create) {
     pf_status_t pfs;
-/* // old implementation
-    if (!create) {
-        pfs = pf_open(handle, size, mode, g_pf_wrap_key, &pf->context);
-    } else {
-        char name[URI_MAX];
-        char prefix[URI_MAX];
-        size_t len = URI_MAX;
-        int ret    = get_base_name(path, name, &len);
-        if (ret < 0) {
-            SGX_DBG(DBG_E, "Couldn't normalize path (%s): %s\n", path, pal_strerror(ret));
-            return ret;
-        }
-
-        memcpy(prefix, path, strlen(path) - len);
-        prefix[strlen(path) - len] = 0;
-
-        pfs = pf_create(handle, prefix, name, g_pf_wrap_key, &pf->context);
-    }
-*/
-    pfs = pf_open(handle, path, size, mode, create, &g_pf_wrap_key, &pf->context);
+    /* TODO: enable_recovery is always false for now */
+    pfs = pf_open(handle, path, size, mode, create, false, &g_pf_wrap_key, &pf->context);
     if (PF_FAILURE(pfs)) {
         SGX_DBG(DBG_E, "pf_open(%d, %s) failed: %d\n", *(int*)handle, path, pfs);
         return -PAL_ERROR_DENIED;

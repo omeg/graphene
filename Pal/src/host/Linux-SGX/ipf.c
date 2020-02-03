@@ -431,7 +431,7 @@ bool ipf_init_fields(pf_context_t pf) {
 
 // constructor
 pf_context_t ipf_open(const char* filename, open_mode_t mode, pf_handle_t file, size_t real_size,
-                      const pf_key_t* kdk_key) {
+                      const pf_key_t* kdk_key, bool enable_recovery) {
     pf_context* pf = cb_malloc(sizeof(pf_context));
 
     pf_last_error = PF_STATUS_NO_MEMORY;
@@ -494,7 +494,7 @@ pf_context_t ipf_open(const char* filename, open_mode_t mode, pf_handle_t file, 
     pf->file = file;
     pf->real_file_size = real_size;
 
-    if (filename) {
+    if (filename && enable_recovery) {
         strncpy(pf->recovery_filename, filename, FULLNAME_MAX_LEN - 1); // copy full file name
         pf->recovery_filename[FULLNAME_MAX_LEN - 1] = '\0'; // just to be safe
         size_t full_name_len = strnlen(pf->recovery_filename, RECOVERY_FILE_MAX_LEN);
@@ -536,7 +536,9 @@ bool ipf_file_recovery(pf_context_t pf, const char* filename) {
     size_t new_file_size = 0;
 
     DEBUG_PF("pf %p, filename: '%s'\n", pf, filename);
-    if (!filename) { // no path was passed during open
+    if (!filename || strnlen(filename, 1) == 0 || !pf->recovery_filename
+        || strnlen(pf->recovery_filename, 1) == 0) {
+
         pf_last_error = PF_STATUS_RECOVERY_IMPOSSIBLE;
         return false;
     }
@@ -632,6 +634,10 @@ bool ipf_init_existing_file(pf_context_t pf, const char* filename) {
     if (pf->file_meta_data.plain_part.update_flag == 1) {
         // file was in the middle of an update, must do a recovery
         if (!ipf_file_recovery(pf, filename)) {
+            if (pf_last_error == PF_STATUS_RECOVERY_IMPOSSIBLE) {
+                DEBUG_PF("file recovery impossible\n");
+                return false;
+            }
             // override internal error
             pf_last_error = PF_STATUS_RECOVERY_NEEDED;
             return false;
@@ -852,10 +858,12 @@ bool ipf_internal_flush(pf_context_t pf, /*bool mc,*/ bool flush_to_disk) {
 */
     if (pf->encrypted_part_plain.size > MD_USER_DATA_SIZE && pf->root_mht.need_writing) {
         // otherwise it's just one write - the meta-data node
-        if (_RECOVERY_HOOK_(0) || !ipf_write_recovery_file(pf)) {
-            pf->file_status = PF_STATUS_FLUSH_ERROR;
-            DEBUG_PF("failed to write recovery file\n");
-            return false;
+        if (pf->recovery_filename && pf->recovery_filename[0]) {
+            if (_RECOVERY_HOOK_(0) || !ipf_write_recovery_file(pf)) {
+                pf->file_status = PF_STATUS_FLUSH_ERROR;
+                DEBUG_PF("failed to write recovery file\n");
+                return false;
+            }
         }
 
         if (_RECOVERY_HOOK_(1) || !ipf_set_update_flag(pf, flush_to_disk)) {
@@ -948,7 +956,7 @@ bool ipf_write_recovery_file(pf_context_t pf) {
     pf_handle_t recovery_file = NULL;
 
     DEBUG_PF("pf %p\n", pf);
-    if (!pf->recovery_filename) {
+    if (!pf->recovery_filename || !pf->recovery_filename[0]) {
         pf_last_error = PF_STATUS_RECOVERY_IMPOSSIBLE;
         return false;
     }
@@ -2035,12 +2043,9 @@ bool ipf_do_file_recovery(pf_context_t pf, const char* filename, uint32_t node_s
 
     DEBUG_PF("pf %p, filename '%s', recovery '%s'\n", pf, filename, pf->recovery_filename);
     do {
-        if (filename == NULL || strnlen(filename, 1) == 0) {
-            pf_last_error = PF_STATUS_RECOVERY_IMPOSSIBLE;
-            return false;
-        }
+        if (!filename || strnlen(filename, 1) == 0 || !pf->recovery_filename
+            || strnlen(pf->recovery_filename, 1) == 0) {
 
-        if (pf->recovery_filename == NULL || strnlen(pf->recovery_filename, 1) == 0) {
             pf_last_error = PF_STATUS_RECOVERY_IMPOSSIBLE;
             return false;
         }
@@ -2111,13 +2116,14 @@ bool ipf_do_file_recovery(pf_context_t pf, const char* filename, uint32_t node_s
 
 // public API
 
-pf_status_t pf_open(pf_handle_t handle, const char* path, size_t underlying_size, pf_file_mode_t mode,
-                    bool create, const pf_key_t* key, pf_context_t* context) {
+pf_status_t pf_open(pf_handle_t handle, const char* path, size_t underlying_size,
+                    pf_file_mode_t mode, bool create, bool enable_recovery, const pf_key_t* key,
+                    pf_context_t* context) {
     open_mode_t om = {0};
     om.read = !!(mode & PF_FILE_MODE_READ);
     om.write = !!(mode & PF_FILE_MODE_WRITE);
     om.update = !create;
-    *context = ipf_open(path, om, handle, underlying_size, key);
+    *context = ipf_open(path, om, handle, underlying_size, key, enable_recovery);
     if (*context)
         return PF_STATUS_SUCCESS;
     return pf_last_error;

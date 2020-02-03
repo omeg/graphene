@@ -508,7 +508,7 @@ bool ipf_pre_close(pf_context_t pf);
 bool ipf_clear_cache(pf_context_t pf);
 
 pf_context_t ipf_open(const char* filename, open_mode_t mode, pf_handle_t file, size_t real_size,
-                      const pf_key_t* kdk_key);
+                      const pf_key_t* kdk_key, bool enable_recovery);
 bool ipf_close(pf_context_t pf);
 size_t ipf_read(pf_context_t pf, void* ptr, size_t size, size_t count);
 size_t ipf_write(pf_context_t pf, const void* ptr, size_t size, size_t count);
@@ -540,12 +540,14 @@ bool ipf_remove(const char* filename);
  * \param [in] underlying_size Underlying file size
  * \param [in] mode Access mode
  * \param [in] create Overwrite file contents if true
+ * \param [in] enable_recovery Enable the recovery file feature
  * \param [in] key Wrap key
  * \param [out] context PF context for later calls
  * \return PF status
  */
 pf_status_t pf_open(pf_handle_t handle, const char* path, size_t underlying_size,
-                    pf_file_mode_t mode, bool create, const pf_key_t* key, pf_context_t* context);
+                    pf_file_mode_t mode, bool create, bool enable_recovery, const pf_key_t* key,
+                    pf_context_t* context);
 
 /*!
  * \brief Close a protected file and commit all changes to disk
