@@ -41,31 +41,52 @@ static void* cb_malloc(size_t size) {
     return address;
 }
 
-static int pal_prot(pf_file_mode_t mode) {
-    int prot = 0;
-    if (mode & PF_FILE_MODE_READ)
-        prot |= PROT_READ;
-    if (mode & PF_FILE_MODE_WRITE)
-        prot |= PROT_WRITE;
-    return prot;
-}
-
-static pf_status_t cb_map(pf_handle_t handle, pf_file_mode_t mode, size_t offset, size_t size,
-                          void** address) {
+static pf_status_t cb_read(pf_handle_t handle, void* buffer, size_t offset, size_t size) {
     int fd  = *(int*)handle;
-    int ret = ocall_mmap_untrusted(fd, offset, size, pal_prot(mode), address);
+    int ret = ocall_lseek(fd, offset, SEEK_SET);
     if (IS_ERR(ret)) {
-        SGX_DBG(DBG_E, "cb_map(%d, %d, %lu, %lu): ocall failed: %d\n", fd, mode, offset, size, ret);
+        SGX_DBG(DBG_E, "cb_read(%d, %p, %lu, %lu): lseek failed: %d\n",
+                fd, buffer, offset, size, ret);
         return PF_STATUS_CALLBACK_FAILED;
+    }
+
+    size_t offs = 0;
+    while (size > 0) {
+        ssize_t read = ocall_read(fd, buffer + offs, size);
+        if (read == -EINTR)
+            continue;
+        if (read <= 0) {
+            SGX_DBG(DBG_E, "cb_read(%d, %p, %lu, %lu): read failed: %ld\n",
+                    fd, buffer, offset, size, read);
+            return PF_STATUS_CALLBACK_FAILED;
+        }
+        size -= ret;
+        offs += ret;
     }
     return PF_STATUS_SUCCESS;
 }
 
-static pf_status_t cb_unmap(void* address, size_t size) {
-    int ret = ocall_munmap_untrusted(address, size);
+static pf_status_t cb_write(pf_handle_t handle, void* buffer, size_t offset, size_t size) {
+    int fd  = *(int*)handle;
+    int ret = ocall_lseek(fd, offset, SEEK_SET);
     if (IS_ERR(ret)) {
-        SGX_DBG(DBG_E, "cb_unmap(%p, %lu): ocall failed: %d\n", address, size, ret);
+        SGX_DBG(DBG_E, "cb_write(%d, %p, %lu, %lu): lseek failed: %d\n",
+            fd, buffer, offset, size, ret);
         return PF_STATUS_CALLBACK_FAILED;
+    }
+
+    size_t offs = 0;
+    while (size > 0) {
+        ssize_t written = ocall_write(fd, buffer + offs, size);
+        if (written == -EINTR)
+            continue;
+        if (written <= 0) {
+            SGX_DBG(DBG_E, "cb_write(%d, %p, %lu, %lu): write failed: %ld\n",
+                    fd, buffer, offset, size, written);
+            return PF_STATUS_CALLBACK_FAILED;
+        }
+        size -= ret;
+        offs += ret;
     }
     return PF_STATUS_SUCCESS;
 }
@@ -450,7 +471,7 @@ out:
 
 /* Initialize the PF library, register PFs from the manifest */
 int init_protected_files() {
-    pf_set_callbacks(cb_malloc, free, cb_map, cb_unmap, cb_truncate, cb_flush, cb_open, cb_close,
+    pf_set_callbacks(cb_malloc, free, cb_read, cb_write, cb_truncate, cb_flush, cb_open, cb_close,
                      cb_delete,
 #ifdef DEBUG
                      cb_debug

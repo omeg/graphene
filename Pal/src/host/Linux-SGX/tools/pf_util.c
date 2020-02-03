@@ -43,84 +43,133 @@ void* linux_malloc(size_t size) {
     return address;
 }
 
-int linux_prot(pf_file_mode_t mode) {
-    int prot = 0;
-    if (mode & PF_FILE_MODE_READ)
-        prot |= PROT_READ;
-    if (mode & PF_FILE_MODE_WRITE)
-        prot |= PROT_WRITE;
-    return prot;
-}
-
-pf_status_t linux_map(pf_handle_t handle, pf_file_mode_t mode, size_t offset, size_t size,
-                      void** address) {
+pf_status_t linux_read(pf_handle_t handle, void* buffer, size_t offset, size_t size) {
     int fd = *(int*)handle;
-    *address = mmap(NULL, size, linux_prot(mode), MAP_SHARED, fd, offset);
-
-    if (*address == MAP_FAILED) {
-        ERROR("linux_map(%d, %d, %zu, %zu): %s\n", fd, mode, offset, size, strerror(errno));
+    DBG("linux_read: fd %d, buf %p, offset %zu, size %zu\n", fd, buffer, offset, size);
+    if (lseek(fd, offset, SEEK_SET) < 0) {
+        ERROR("lseek failed: %s\n", strerror(errno));
         return PF_STATUS_CALLBACK_FAILED;
+    }
+
+    off_t offs = 0;
+    while (size > 0) {
+        ssize_t ret = read(fd, buffer + offs, size);
+        if (ret == -EINTR)
+            continue;
+        if (ret <= 0) {
+            ERROR("read failed: %s\n", strerror(errno));
+            return PF_STATUS_CALLBACK_FAILED;
+        }
+        size -= ret;
+        offs += ret;
     }
 
     return PF_STATUS_SUCCESS;
 }
 
-pf_status_t linux_unmap(void* address, size_t size) {
-    int ret = munmap(address, size);
-    if (ret < 0) {
-        ERROR("linux_unmap(%p, %zu): %s\n", address, size, strerror(errno));
+pf_status_t linux_write(pf_handle_t handle, void* buffer, size_t offset, size_t size) {
+    int fd = *(int*)handle;
+    DBG("linux_write: fd %d, buf %p, offset %zu, size %zu\n", fd, buffer, offset, size);
+    if (lseek(fd, offset, SEEK_SET) < 0) {
+        ERROR("lseek failed: %s\n", strerror(errno));
         return PF_STATUS_CALLBACK_FAILED;
     }
 
+    off_t offs = 0;
+    while (size > 0) {
+        ssize_t ret = write(fd, buffer + offs, size);
+        if (ret == -EINTR)
+            continue;
+        if (ret <= 0) {
+            ERROR("write failed: %s\n", strerror(errno));
+        }
+        size -= ret;
+        offs += ret;
+    }
     return PF_STATUS_SUCCESS;
 }
 
 pf_status_t linux_truncate(pf_handle_t handle, size_t size) {
     int fd  = *(int*)handle;
+    DBG("linux_truncate: fd %d, size %zu\n", fd, size);
     int ret = ftruncate(fd, size);
     if (ret < 0) {
-        ERROR("linux_truncate(%d, %zu): %s\n", fd, size, strerror(errno));
+        ERROR("ftruncate failed: %s\n", strerror(errno));
         return PF_STATUS_CALLBACK_FAILED;
     }
 
     return PF_STATUS_SUCCESS;
 }
 
-pf_status_t linux_flush(__attribute__((unused)) pf_handle_t handle) {
-    return PF_STATUS_NOT_IMPLEMENTED;
+pf_status_t linux_flush(pf_handle_t handle) {
+    int fd  = *(int*)handle;
+    DBG("linux_flush: fd %d\n", fd);
+    int ret = fsync(fd);
+    if (ret < 0) {
+        ERROR("fsync failed: %s\n", strerror(errno));
+        return PF_STATUS_CALLBACK_FAILED;
+    }
+
+    return PF_STATUS_SUCCESS;
 }
 
 pf_status_t linux_open(const char* path, pf_file_mode_t mode, pf_handle_t* handle, size_t* size) {
-    // TODO
-    __UNUSED(path);
-    __UNUSED(mode);
-    __UNUSED(handle);
-    __UNUSED(size);
-    ERROR("linux_open(%s): not implemented\n", path);
-    return PF_STATUS_NOT_IMPLEMENTED;
+    DBG("linux_open: '%s', mode %d\n", path, mode);
+    *handle = malloc(sizeof(int));
+    if (!*handle)
+        return PF_STATUS_NO_MEMORY;
+
+    // write access in this callback is only used for creating recovery files
+    int flags = mode == PF_FILE_MODE_READ ? O_RDONLY : O_WRONLY | O_CREAT | O_TRUNC;
+    int fd = open(path, flags, 0600);
+
+    if (fd < 0) {
+        free(*handle);
+        ERROR("open failed: %s\n", strerror(errno));
+        return PF_STATUS_CALLBACK_FAILED;
+    }
+
+    if (size) {
+        struct stat st;
+        if (fstat(fd, &st) < 0) {
+            free(*handle);
+            ERROR("fstat failed: %s\n", strerror(errno));
+            return PF_STATUS_CALLBACK_FAILED;
+        }
+
+        *size = st.st_size;
+    }
+
+    *(int*)*handle = fd;
+
+    return PF_STATUS_SUCCESS;
 }
 
 pf_status_t linux_close(pf_handle_t handle) {
     int fd  = *(int*)handle;
+    DBG("linux_close: fd %d\n", fd);
     int ret = close(fd);
     if (ret < 0) {
-        ERROR("linux_close(%d): %s\n", fd, strerror(errno));
+        ERROR("close failed: %s\n", strerror(errno));
         return PF_STATUS_CALLBACK_FAILED;
     }
+
+    free(handle);
     return PF_STATUS_SUCCESS;
 }
 
 static pf_status_t linux_delete(const char* path) {
+    DBG("linux_delete: '%s'\n", path);
     int ret = unlink(path);
     if (ret < 0) {
-        ERROR("linux_delete(%s): %s\n", path, strerror(errno));
+        ERROR("unlink failed: %s\n", strerror(errno));
         return PF_STATUS_CALLBACK_FAILED;
     }
     return PF_STATUS_SUCCESS;
 }
 
 void pf_set_linux_callbacks(pf_debug_f debug_f) {
-    pf_set_callbacks(linux_malloc, free, linux_map, linux_unmap, linux_truncate, linux_flush,
+    pf_set_callbacks(linux_malloc, free, linux_read, linux_write, linux_truncate, linux_flush,
                      linux_open, linux_close, linux_delete, debug_f);
 }
 
@@ -381,8 +430,13 @@ int pf_encrypt_file(const char* input_path, const char* output_path, const pf_ke
     ret = 0;
 
 out:
-    if (pf)
-        pf_close(pf);
+    if (pf) {
+        if (PF_FAILURE(pf_close(pf))) {
+            ERROR("failed to close PF\n");
+            ret = -1;
+        }
+    }
+
     if (input >= 0)
         close(input);
     if (output >= 0)
