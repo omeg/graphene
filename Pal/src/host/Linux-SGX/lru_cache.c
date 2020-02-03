@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <list.h>
 #include "lru_cache.h"
 
@@ -95,7 +96,7 @@ bool lruc_add(lruc_context_t lruc, uint64_t key, void* data) {
     list_node->key = key;
     map_node->key = key;
     LISTP_ADD(list_node, &lruc->list, list);
-    lruc_map_node_t* mn = get_map_node(lruc, key);
+    __attribute__((unused)) lruc_map_node_t* mn = get_map_node(lruc, key);
     assert(mn == NULL);
     map_node->data = data;
     map_node->list_ptr = list_node;

@@ -1,12 +1,11 @@
 include ../../../../../Makefile.configs
 
 CFLAGS := -Wall -Wextra -O2 -maes -std=c11 \
-	-fno-omit-frame-pointer \
-	-D_POSIX_C_SOURCE=200809L
+	-fno-omit-frame-pointer -I../../../../lib -D_GNU_SOURCE
 
 ifeq ($(DEBUG),1)
 CC += -gdwarf-2 -g3
-CFLAGS += -DDEBUG -I../../../../lib
+CFLAGS += -DDEBUG
 export DEBUG
 endif
 
