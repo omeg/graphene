@@ -503,12 +503,6 @@ pf_context_t ipf_open(const char* filename, open_mode_t mode, pf_handle_t file, 
 
     if (pf->real_file_size > 0) {
         // existing file
-        if (pf->open_mode.write == 1) {
-            // redundant check, just in case
-            pf_last_error = PF_STATUS_INVALID_MODE;
-            goto out;
-        }
-
         if (!ipf_init_existing_file(pf, filename))
             goto out;
 
