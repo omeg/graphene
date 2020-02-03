@@ -71,13 +71,6 @@ void erase_memory(void *buffer, size_t size) {
 #endif
 }
 
-int __strncmp(const char *_l, const char *_r, size_t n) {
-    const unsigned char *l=(void *)_l, *r=(void *)_r;
-    if (!n--) return 0;
-    for (; *l && *r && n && *l == *r ; l++, r++, n--);
-    return *l - *r;
-}
-
 char* strncpy(char* dest, const char* src, size_t size) {
     size_t src_len = strlen(src) + 1;
     size_t len = src_len < size ? src_len : size;
@@ -666,7 +659,9 @@ bool ipf_init_existing_file(pf_context_t pf, const char* filename) {
     }
 
     if (filename) {
-        if (__strncmp(filename, pf->encrypted_part_plain.clean_filename, FILENAME_MAX_LEN) != 0) {
+        size_t name_len = strnlen(pf->encrypted_part_plain.clean_filename, FILENAME_MAX_LEN);
+        if (name_len != strnlen(filename, FILENAME_MAX_LEN) ||
+            memcmp(filename, pf->encrypted_part_plain.clean_filename, name_len) != 0) {
             pf_last_error = PF_STATUS_INVALID_PATH;
             return false;
         }
