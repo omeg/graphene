@@ -60,8 +60,8 @@ static pf_status_t cb_read(pf_handle_t handle, void* buffer, size_t offset, size
                     fd, buffer, offset, size, read);
             return PF_STATUS_CALLBACK_FAILED;
         }
-        size -= ret;
-        offs += ret;
+        size -= read;
+        offs += read;
     }
     return PF_STATUS_SUCCESS;
 }
@@ -85,8 +85,8 @@ static pf_status_t cb_write(pf_handle_t handle, void* buffer, size_t offset, siz
                     fd, buffer, offset, size, written);
             return PF_STATUS_CALLBACK_FAILED;
         }
-        size -= ret;
-        offs += ret;
+        size -= written;
+        offs += written;
     }
     return PF_STATUS_SUCCESS;
 }
