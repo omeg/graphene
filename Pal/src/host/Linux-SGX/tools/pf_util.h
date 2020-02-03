@@ -20,8 +20,7 @@
 #define PF_UTIL_H
 
 #include <stdint.h>
-//#include "../protected_files.h"
-#include "../ipf.h"
+#include "../protected_files.h"
 
 /* High-level protected files helper functions */
 

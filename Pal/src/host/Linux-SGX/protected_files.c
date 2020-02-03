@@ -50,7 +50,7 @@
 #define __STDC_WANT_LIB_EXT1__ 1
 #include <stdlib.h>
 #include <string.h>
-#include "ipf.h"
+#include "protected_files.h"
 
 size_t strnlen(const char *str, size_t maxlen);
 

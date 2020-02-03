@@ -30,8 +30,7 @@
 #include "sgx_tls.h"
 
 #include "enclave_ocalls.h"
-#include "ipf.h"
-//#include "protected_files.h"
+#include "protected_files.h"
 
 #include <linux/mman.h>
 
