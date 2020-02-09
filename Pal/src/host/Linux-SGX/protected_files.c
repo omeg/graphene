@@ -1342,9 +1342,11 @@ int64_t ipf_tell(pf_context_t pf) {
     return pf->offset;
 }
 
-// we don't support sparse files, fseek beyond the current file size will fail
+// seek beyond the current size is supported for SEEK_SET if the file is writable,
+// the file is then extended with zeros
 bool ipf_seek(pf_context_t pf, int64_t new_offset, int origin) {
-    DEBUG_PF("pf %p, offset %ld, origin %d\n", pf, new_offset, origin);
+    DEBUG_PF("pf %p, size %lu, offset %ld, origin %d\n", pf, pf->encrypted_part_plain.size,
+             new_offset, origin);
     if (PF_FAILURE(pf->file_status)) {
         pf_last_error = pf->file_status;
         return false;
@@ -1354,9 +1356,19 @@ bool ipf_seek(pf_context_t pf, int64_t new_offset, int origin) {
 
     switch (origin) {
     case SEEK_SET:
-        if (new_offset >= 0 && new_offset <= pf->encrypted_part_plain.size) {
-            pf->offset = new_offset;
-            result = true;
+        if (new_offset >= 0) {
+            if (new_offset <= pf->encrypted_part_plain.size) {
+                pf->offset = new_offset;
+                result = true;
+            } else if (!pf->read_only) {
+                // need to extend the file
+                pf->offset = pf->encrypted_part_plain.size;
+                DEBUG_PF("extending the file from %lu to %lu\n", pf->offset, new_offset);
+                if (ipf_write(pf, NULL, 1, new_offset - pf->offset) == 0)
+                    return false;
+                pf->offset = new_offset;
+                result = true;
+            }
         }
         break;
 
@@ -1493,9 +1505,20 @@ bool ipf_clear_cache(pf_context_t pf) {
     return true;
 }
 
+// memcpy src->dest if src is not NULL, zero dest otherwise
+void memcpy_or_zero(void* dest, const void* src, size_t size) {
+    if (src)
+        memcpy(dest, src, size);
+    else
+        memset(dest, 0, size);
+}
+
+// write zeros if buffer is NULL
 size_t ipf_write(pf_context_t pf, const void* ptr, size_t size, size_t count) {
-    if (ptr == NULL || size == 0 || count == 0)
+    if (size == 0 || count == 0) {
+        pf_last_error = PF_STATUS_INVALID_PARAMETER;
         return 0;
+    }
 
     size_t data_left_to_write = size * count;
     DEBUG_PF("pf %p, buf %p, size %lu (%lu * %lu)\n", pf, ptr, data_left_to_write, size, count);
@@ -1525,14 +1548,18 @@ size_t ipf_write(pf_context_t pf, const void* ptr, size_t size, size_t count) {
         // offset is smaller than MD_USER_DATA_SIZE
         size_t empty_place_left_in_md = MD_USER_DATA_SIZE - (size_t)pf->offset;
         if (data_left_to_write <= empty_place_left_in_md) {
-            memcpy(&pf->encrypted_part_plain.data[pf->offset], data_to_write, data_left_to_write);
+            memcpy_or_zero(&pf->encrypted_part_plain.data[pf->offset], data_to_write,
+                           data_left_to_write);
             pf->offset += data_left_to_write;
-            data_to_write += data_left_to_write; // not needed, to prevent future errors
+            if (data_to_write)
+                data_to_write += data_left_to_write; // not needed, to prevent future errors
             data_left_to_write = 0;
         } else {
-            memcpy(&pf->encrypted_part_plain.data[pf->offset], data_to_write, empty_place_left_in_md);
+            memcpy_or_zero(&pf->encrypted_part_plain.data[pf->offset], data_to_write,
+                           empty_place_left_in_md);
             pf->offset += empty_place_left_in_md;
-            data_to_write += empty_place_left_in_md;
+            if (data_to_write)
+                data_to_write += empty_place_left_in_md;
             data_left_to_write -= empty_place_left_in_md;
         }
 
@@ -1557,14 +1584,18 @@ size_t ipf_write(pf_context_t pf, const void* ptr, size_t size, size_t count) {
 
         if (data_left_to_write <= empty_place_left_in_node) {
             // this will be the last write
-            memcpy(&file_data_node->plain.data[offset_in_node], data_to_write, data_left_to_write);
+            memcpy_or_zero(&file_data_node->plain.data[offset_in_node], data_to_write,
+                           data_left_to_write);
             pf->offset += data_left_to_write;
-            data_to_write += data_left_to_write; // not needed, to prevent future errors
+            if (data_to_write)
+                data_to_write += data_left_to_write; // not needed, to prevent future errors
             data_left_to_write = 0;
         } else {
-            memcpy(&file_data_node->plain.data[offset_in_node], data_to_write, empty_place_left_in_node);
+            memcpy_or_zero(&file_data_node->plain.data[offset_in_node], data_to_write,
+                           empty_place_left_in_node);
             pf->offset += empty_place_left_in_node;
-            data_to_write += empty_place_left_in_node;
+            if (data_to_write)
+                data_to_write += empty_place_left_in_node;
             data_left_to_write -= empty_place_left_in_node;
         }
 
