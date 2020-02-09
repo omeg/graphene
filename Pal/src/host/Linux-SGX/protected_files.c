@@ -1362,12 +1362,7 @@ bool ipf_seek(pf_context_t pf, int64_t new_offset, int origin) {
                 result = true;
             } else if (!pf->read_only) {
                 // need to extend the file
-                pf->offset = pf->encrypted_part_plain.size;
-                DEBUG_PF("extending the file from %lu to %lu\n", pf->offset, new_offset);
-                if (ipf_write(pf, NULL, 1, new_offset - pf->offset) == 0)
-                    return false;
-                pf->offset = new_offset;
-                result = true;
+                result = PF_SUCCESS(pf_set_size(pf, new_offset));
             }
         }
         break;
@@ -2160,10 +2155,24 @@ pf_status_t pf_get_size(pf_context_t pf, size_t* size) {
     return PF_STATUS_SUCCESS;
 }
 
-// TODO: just write zeros at the end for extending, shrinking may be harder
+// TODO: file truncation
 pf_status_t pf_set_size(pf_context_t pf, size_t size) {
-    __UNUSED(pf);
-    __UNUSED(size);
+    // this file format uses int64 for size
+    if (size > INT64_MAX)
+        return PF_STATUS_INVALID_PARAMETER;
+
+    if (pf->read_only)
+        return PF_STATUS_INVALID_MODE;
+
+    if ((int64_t)size > pf->encrypted_part_plain.size) {
+        // extend the file
+        pf->offset = pf->encrypted_part_plain.size;
+        DEBUG_PF("extending the file from %lu to %lu\n", pf->offset, size);
+        if (ipf_write(pf, NULL, 1, size - pf->offset) != size - pf->offset)
+            return pf_last_error;
+        pf->offset = size;
+        return PF_STATUS_SUCCESS;
+    }
     return PF_STATUS_NOT_IMPLEMENTED;
 }
 
