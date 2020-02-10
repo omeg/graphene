@@ -2169,7 +2169,7 @@ pf_status_t pf_set_size(pf_context_t pf, size_t size) {
 pf_status_t pf_read(pf_context_t pf, uint64_t offset, size_t size, void* output) {
     if (!ipf_seek(pf, offset, SEEK_SET))
         return pf_last_error;
-    if (!ipf_read(pf, output, 1, size))
+    if (ipf_read(pf, output, 1, size) != size)
         return pf_last_error;
     return PF_STATUS_SUCCESS;
 }
@@ -2177,7 +2177,7 @@ pf_status_t pf_read(pf_context_t pf, uint64_t offset, size_t size, void* output)
 pf_status_t pf_write(pf_context_t pf, uint64_t offset, size_t size, const void* input) {
     if (!ipf_seek(pf, offset, SEEK_SET))
         return pf_last_error;
-    if (!ipf_write(pf, input, 1, size))
+    if (ipf_write(pf, input, 1, size) != size)
         return pf_last_error;
     return PF_STATUS_SUCCESS;
 }
