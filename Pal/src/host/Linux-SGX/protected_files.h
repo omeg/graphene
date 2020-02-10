@@ -491,7 +491,7 @@ bool ipf_update_all_data_and_mht_nodes(pf_context_t pf);
 bool ipf_update_meta_data_node(pf_context_t pf);
 bool ipf_write_all_changes_to_disk(pf_context_t pf, bool flush_to_disk);
 bool ipf_erase_recovery_file(pf_context_t pf);
-bool ipf_internal_flush(pf_context_t pf, /*bool mc,*/ bool flush_to_disk);
+bool ipf_internal_flush(pf_context_t pf, bool flush_to_disk);
 bool ipf_do_file_recovery(pf_context_t pf, const char* filename, uint32_t node_size);
 bool ipf_pre_close(pf_context_t pf);
 bool ipf_clear_cache(pf_context_t pf);
@@ -506,7 +506,7 @@ bool ipf_seek(pf_context_t pf, int64_t new_offset, int origin);
 bool ipf_get_eof(pf_context_t pf);
 pf_status_t ipf_get_error(pf_context_t pf);
 void ipf_clear_error(pf_context_t pf);
-bool ipf_flush(pf_context_t pf/*, bool mc*/);
+bool ipf_flush(pf_context_t pf);
 bool ipf_remove(const char* filename);
 
 #ifndef SEEK_SET
