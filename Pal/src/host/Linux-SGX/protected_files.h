@@ -372,16 +372,6 @@ typedef struct _recovery_node {
 
 #define MAX_PAGES_IN_CACHE 48
 
-typedef union {
-    struct {
-        uint8_t read   :1;
-        uint8_t write  :1;
-        uint8_t append :1;
-        uint8_t update :1;
-    };
-    uint8_t raw;
-} open_mode_t;
-
 typedef enum {
     FILE_MHT_NODE_TYPE = 1,
     FILE_DATA_NODE_TYPE = 2,
@@ -451,8 +441,7 @@ typedef struct _ipf_context {
     meta_data_encrypted_t encrypted_part_plain; // encrypted part of meta data node, decrypted
     file_mht_node_t root_mht; // the root of the mht is always needed (for files bigger than 3KB)
     pf_handle_t file; // TODO: rename to handle
-    open_mode_t open_mode;
-    uint8_t read_only;
+    pf_file_mode_t mode;
     int64_t offset; // current file position (user's view)
     bool end_of_file; // flag
     size_t real_file_size;
@@ -507,8 +496,8 @@ bool ipf_do_file_recovery(pf_context_t pf, const char* filename, uint32_t node_s
 bool ipf_pre_close(pf_context_t pf);
 bool ipf_clear_cache(pf_context_t pf);
 
-pf_context_t ipf_open(const char* filename, open_mode_t mode, pf_handle_t file, size_t real_size,
-                      const pf_key_t* kdk_key, bool enable_recovery);
+pf_context_t ipf_open(const char* filename, pf_file_mode_t mode, bool create, pf_handle_t file,
+                      size_t real_size, const pf_key_t* kdk_key, bool enable_recovery);
 bool ipf_close(pf_context_t pf);
 size_t ipf_read(pf_context_t pf, void* ptr, size_t size, size_t count);
 size_t ipf_write(pf_context_t pf, const void* ptr, size_t size, size_t count);

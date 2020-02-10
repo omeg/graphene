@@ -407,11 +407,9 @@ bool ipf_init_fields(pf_context_t pf) {
     pf->file = NULL;
     pf->end_of_file = false;
     pf->need_writing = false;
-    pf->read_only = 0;
     pf->file_status = PF_STATUS_UNINITIALIZED;
     pf_last_error = PF_STATUS_SUCCESS;
     pf->real_file_size = 0;
-    pf->open_mode.raw = 0;
     pf->master_key_count = 0;
 
     pf->recovery_filename[0] = '\0';
@@ -423,8 +421,8 @@ bool ipf_init_fields(pf_context_t pf) {
 }
 
 // constructor
-pf_context_t ipf_open(const char* filename, open_mode_t mode, pf_handle_t file, size_t real_size,
-                      const pf_key_t* kdk_key, bool enable_recovery) {
+pf_context_t ipf_open(const char* filename, pf_file_mode_t mode, bool create, pf_handle_t file,
+                      size_t real_size, const pf_key_t* kdk_key, bool enable_recovery) {
     pf_context* pf = cb_malloc(sizeof(pf_context));
 
     pf_last_error = PF_STATUS_NO_MEMORY;
@@ -434,12 +432,12 @@ pf_context_t ipf_open(const char* filename, open_mode_t mode, pf_handle_t file, 
     if (!ipf_init_fields(pf))
         goto out;
 
-    DEBUG_PF("handle: %d, path: '%s', size: %lu, mode: 0x%x\n",
-             *(int*)file, filename, real_size, (int)mode.raw);
+    DEBUG_PF("handle: %d, path: '%s', real size: %lu, mode: 0x%x\n",
+             *(int*)file, filename, real_size, mode);
 
     // omeg: filename can be NULL for existing files, then we skip path verification
-    if (kdk_key == NULL || (mode.write == 0 && mode.read == 0)) {
-        DEBUG_PF("invalid mode\n");
+    if (kdk_key == NULL) {
+        DEBUG_PF("no key specified\n");
         pf_last_error = PF_STATUS_INVALID_PARAMETER;
         goto out;
     }
@@ -469,10 +467,6 @@ pf_context_t ipf_open(const char* filename, open_mode_t mode, pf_handle_t file, 
     // omeg: we require a canonical full path to file, so no stripping path to filename only
     // omeg: Intel's implementation opens the file, we get the fd and size from the Graphene handler
 
-    pf->open_mode = mode;
-    pf->read_only = (pf->open_mode.read == 1 && pf->open_mode.update == 0);
-    // read only files can be opened simultaneously by many enclaves
-
     if (!file) {
         DEBUG_PF("invalid handle\n");
         pf_last_error = PF_STATUS_INVALID_PARAMETER;
@@ -486,6 +480,7 @@ pf_context_t ipf_open(const char* filename, open_mode_t mode, pf_handle_t file, 
 
     pf->file = file;
     pf->real_file_size = real_size;
+    pf->mode = mode;
 
     if (filename && enable_recovery) {
         strncpy(pf->recovery_filename, filename, FULLNAME_MAX_LEN - 1); // copy full file name
@@ -494,7 +489,7 @@ pf_context_t ipf_open(const char* filename, open_mode_t mode, pf_handle_t file, 
         strncpy(&pf->recovery_filename[full_name_len], "_recovery", 10);
     }
 
-    if (pf->real_file_size > 0) {
+    if (!create) {
         // existing file
         if (!ipf_init_existing_file(pf, filename))
             goto out;
@@ -544,8 +539,7 @@ bool ipf_file_recovery(pf_context_t pf, const char* filename) {
         return false;
     }
 
-    status = cb_open(filename, pf->read_only ? PF_FILE_MODE_READ : PF_FILE_MODE_WRITE,
-                     &pf->file, &new_file_size);
+    status = cb_open(filename, pf->mode, &pf->file, &new_file_size);
     if (PF_FAILURE(status)) {
         pf_last_error = status;
         return false;
@@ -1530,9 +1524,9 @@ size_t ipf_write(pf_context_t pf, const void* ptr, size_t size, size_t count) {
         return 0;
     }
 
-    if (pf->open_mode.update == 0 && pf->open_mode.write == 0) {
+    if (!(pf->mode & PF_FILE_MODE_WRITE)) {
         pf_last_error = PF_STATUS_INVALID_MODE;
-        DEBUG_PF("bad file mode 0x%x\n", pf->open_mode.raw);
+        DEBUG_PF("File is read-only\n");
         return 0;
     }
 
@@ -1634,7 +1628,7 @@ size_t ipf_read(pf_context_t pf, void* ptr, size_t size, size_t count) {
         return 0;
     }
 
-    if (pf->open_mode.read == 0 && pf->open_mode.update == 0) {
+    if (!(pf->mode & PF_FILE_MODE_READ)) {
         pf_last_error = PF_STATUS_INVALID_MODE;
         return 0;
     }
@@ -2134,11 +2128,7 @@ bool ipf_do_file_recovery(pf_context_t pf, const char* filename, uint32_t node_s
 pf_status_t pf_open(pf_handle_t handle, const char* path, size_t underlying_size,
                     pf_file_mode_t mode, bool create, bool enable_recovery, const pf_key_t* key,
                     pf_context_t* context) {
-    open_mode_t om = {0};
-    om.read = !!(mode & PF_FILE_MODE_READ);
-    om.write = !!(mode & PF_FILE_MODE_WRITE);
-    om.update = !create;
-    *context = ipf_open(path, om, handle, underlying_size, key, enable_recovery);
+    *context = ipf_open(path, mode, create, handle, underlying_size, key, enable_recovery);
     if (*context)
         return PF_STATUS_SUCCESS;
     return pf_last_error;
@@ -2161,7 +2151,7 @@ pf_status_t pf_set_size(pf_context_t pf, size_t size) {
     if (size > INT64_MAX)
         return PF_STATUS_INVALID_PARAMETER;
 
-    if (pf->read_only)
+    if (!(pf->mode & PF_FILE_MODE_WRITE))
         return PF_STATUS_INVALID_MODE;
 
     if ((int64_t)size > pf->encrypted_part_plain.size) {
