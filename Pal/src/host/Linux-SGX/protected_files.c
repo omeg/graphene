@@ -1374,20 +1374,14 @@ void memcpy_or_zero(void* dest, const void* src, size_t size) {
 }
 
 // write zeros if buffer is NULL
-size_t ipf_write(pf_context_t pf, const void* ptr, size_t size, size_t count) {
-    if (size == 0 || count == 0) {
+size_t ipf_write(pf_context_t pf, const void* ptr, size_t size) {
+    if (size == 0) {
         pf_last_error = PF_STATUS_INVALID_PARAMETER;
         return 0;
     }
 
-    size_t data_left_to_write = size * count;
-    DEBUG_PF("pf %p, buf %p, size %lu (%lu * %lu)\n", pf, ptr, data_left_to_write, size, count);
-
-    // prevent overlap...
-    if (((uint64_t)((uint64_t)size * (uint64_t)count)) != (uint64_t)data_left_to_write) {
-        pf_last_error = PF_STATUS_INVALID_PARAMETER;
-        return 0;
-    }
+    size_t data_left_to_write = size;
+    DEBUG_PF("pf %p, buf %p, size %lu\n", pf, ptr, size);
 
     if (PF_FAILURE(pf->file_status)) {
         pf_last_error = pf->file_status;
@@ -1476,23 +1470,17 @@ size_t ipf_write(pf_context_t pf, const void* ptr, size_t size, size_t count) {
         }
     }
 
-    size_t ret_count = ((size * count) - data_left_to_write) / size;
+    size_t ret_count = size - data_left_to_write;
     DEBUG_PF("returning %lu\n", ret_count);
     return ret_count;
 }
 
-size_t ipf_read(pf_context_t pf, void* ptr, size_t size, size_t count) {
-    if (ptr == NULL || size == 0 || count == 0)
+size_t ipf_read(pf_context_t pf, void* ptr, size_t size) {
+    if (ptr == NULL || size == 0)
         return 0;
 
-    size_t data_left_to_read = size * count;
-    DEBUG_PF("pf %p, buf %p, size %lu\n", pf, ptr, data_left_to_read);
-
-    // prevent overlap...
-    if (((uint64_t)((uint64_t)size * (uint64_t)count)) != (uint64_t)data_left_to_read) {
-        pf_last_error = PF_STATUS_INVALID_PARAMETER;
-        return 0;
-    }
+    size_t data_left_to_read = size;
+    DEBUG_PF("pf %p, buf %p, size %lu\n", pf, ptr, size);
 
     if (PF_FAILURE(pf->file_status)) {
         pf_last_error = pf->file_status;
@@ -1567,14 +1555,13 @@ size_t ipf_read(pf_context_t pf, void* ptr, size_t size, size_t count) {
         }
     }
 
-    if (data_left_to_read == 0 && data_attempted_to_read != (size * count)) {
+    if (data_left_to_read == 0 && data_attempted_to_read != size) {
         // user wanted to read more and we had to shrink the request
         assert(pf->offset == pf->encrypted_part_plain.size);
         pf->end_of_file = true;
     }
 
-    size_t ret_count = (data_attempted_to_read - data_left_to_read) / size;
-    return ret_count;
+    return data_attempted_to_read - data_left_to_read;
 }
 
 // this is a very 'specific' function, tied to the architecture of the file layout,
@@ -2025,22 +2012,26 @@ pf_status_t pf_set_size(pf_context_t pf, size_t size) {
     if (!(pf->mode & PF_FILE_MODE_WRITE))
         return PF_STATUS_INVALID_MODE;
 
+    if ((int64_t)size == pf->encrypted_part_plain.size)
+        return PF_STATUS_SUCCESS;
+
     if ((int64_t)size > pf->encrypted_part_plain.size) {
         // extend the file
         pf->offset = pf->encrypted_part_plain.size;
         DEBUG_PF("extending the file from %lu to %lu\n", pf->offset, size);
-        if (ipf_write(pf, NULL, 1, size - pf->offset) != size - pf->offset)
+        if (ipf_write(pf, NULL, size - pf->offset) != size - pf->offset)
             return pf_last_error;
         pf->offset = size;
         return PF_STATUS_SUCCESS;
     }
+
     return PF_STATUS_NOT_IMPLEMENTED;
 }
 
 pf_status_t pf_read(pf_context_t pf, uint64_t offset, size_t size, void* output) {
     if (!ipf_seek(pf, offset, SEEK_SET))
         return pf_last_error;
-    if (ipf_read(pf, output, 1, size) != size)
+    if (ipf_read(pf, output, size) != size)
         return pf_last_error;
     return PF_STATUS_SUCCESS;
 }
@@ -2048,7 +2039,7 @@ pf_status_t pf_read(pf_context_t pf, uint64_t offset, size_t size, void* output)
 pf_status_t pf_write(pf_context_t pf, uint64_t offset, size_t size, const void* input) {
     if (!ipf_seek(pf, offset, SEEK_SET))
         return pf_last_error;
-    if (ipf_write(pf, input, 1, size) != size)
+    if (ipf_write(pf, input, size) != size)
         return pf_last_error;
     return PF_STATUS_SUCCESS;
 }

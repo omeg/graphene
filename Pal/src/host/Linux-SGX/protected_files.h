@@ -499,8 +499,8 @@ bool ipf_clear_cache(pf_context_t pf);
 pf_context_t ipf_open(const char* filename, pf_file_mode_t mode, bool create, pf_handle_t file,
                       size_t real_size, const pf_key_t* kdk_key, bool enable_recovery);
 bool ipf_close(pf_context_t pf);
-size_t ipf_read(pf_context_t pf, void* ptr, size_t size, size_t count);
-size_t ipf_write(pf_context_t pf, const void* ptr, size_t size, size_t count);
+size_t ipf_read(pf_context_t pf, void* ptr, size_t size);
+size_t ipf_write(pf_context_t pf, const void* ptr, size_t size);
 int64_t ipf_tell(pf_context_t pf);
 bool ipf_seek(pf_context_t pf, int64_t new_offset, int origin);
 bool ipf_get_eof(pf_context_t pf);
