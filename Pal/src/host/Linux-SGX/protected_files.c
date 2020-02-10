@@ -352,8 +352,6 @@ bool ipf_init_session_master_key(pf_context_t pf) {
 
     pf->master_key_count = 0;
 
-    //DEBUG_PF("master key: ");
-    //HEXDUMPNL(pf->session_master_key);
     return true;
 }
 
@@ -415,8 +413,6 @@ bool ipf_init_fields(pf_context_t pf) {
     pf->recovery_filename[0] = '\0';
 
     pf->cache = lruc_create();
-    // set hash size to fit MAX_PAGES_IN_CACHE
-    //pf->cache.rehash(MAX_PAGES_IN_CACHE);
     return true;
 }
 
@@ -661,46 +657,6 @@ bool ipf_init_existing_file(pf_context_t pf, const char* filename) {
         }
     }
 
-/*
-    sgx_mc_uuid_t empty_mc_uuid = {0};
-    // check if the file contains an active monotonic counter
-    if (consttime_memequal(&empty_mc_uuid, &encrypted_part_plain.mc_uuid, sizeof(sgx_mc_uuid_t)) == 0)
-    {
-        uint32_t mc_value = 0;
-        status = sgx_read_monotonic_counter(&encrypted_part_plain.mc_uuid, &mc_value);
-        if (status != SGX_SUCCESS)
-        {
-            last_error = status;
-            return false;
-        }
-        if (encrypted_part_plain.mc_value < mc_value)
-        {
-            last_error = SGX_ERROR_FILE_MONOTONIC_COUNTER_IS_BIGGER;
-            return false;
-        }
-        if (encrypted_part_plain.mc_value == mc_value + 1) // can happen if AESM failed - file value stayed one higher
-        {
-            sgx_status_t status = sgx_increment_monotonic_counter(&encrypted_part_plain.mc_uuid, &mc_value);
-            if (status != SGX_SUCCESS)
-            {
-                file_status = SGX_FILE_STATUS_MC_NOT_INCREMENTED;
-                last_error = status;
-                return false;
-            }
-        }
-        if (encrypted_part_plain.mc_value != mc_value)
-        {
-            file_status = SGX_FILE_STATUS_CORRUPTED;
-            last_error = SGX_ERROR_UNEXPECTED;
-            return false;
-        }
-    }
-    else
-    {
-        assert(encrypted_part_plain.mc_value == 0);
-        encrypted_part_plain.mc_value = 0; // do this anyway for release...
-    }
-*/
     if (pf->encrypted_part_plain.size > MD_USER_DATA_SIZE) {
         // read the root node of the mht
         if (!ipf_read_node(pf, pf->file, 1, &pf->root_mht.encrypted.cipher, NODE_SIZE))
@@ -744,7 +700,7 @@ bool ipf_close(pf_context_t pf) {
     DEBUG_PF("pf %p\n", pf);
     if (!ipf_pre_close(pf)) {
         retval = false;
-        //goto out; // destroy the memory content anyway
+        // destroy the memory content anyway
     }
 
     while ((data = lruc_get_last(pf->cache)) != NULL) {
@@ -801,7 +757,7 @@ bool ipf_pre_close(pf_context_t pf) {
 
 // file_flush.cpp
 
-bool ipf_flush(pf_context_t pf/*, bool mc*/) {
+bool ipf_flush(pf_context_t pf) {
     bool result = false;
 
     DEBUG_PF("pf %p\n", pf);
@@ -811,7 +767,7 @@ bool ipf_flush(pf_context_t pf/*, bool mc*/) {
         return false;
     }
 
-    result = ipf_internal_flush(pf, /*mc,*/ true);
+    result = ipf_internal_flush(pf, true);
     if (!result) {
         assert(pf->file_status != PF_STATUS_SUCCESS);
         if (pf->file_status == PF_STATUS_SUCCESS)
@@ -824,7 +780,7 @@ bool ipf_flush(pf_context_t pf/*, bool mc*/) {
 // DEBUG
 #define _RECOVERY_HOOK_(_x) (0)
 
-bool ipf_internal_flush(pf_context_t pf, /*bool mc,*/ bool flush_to_disk) {
+bool ipf_internal_flush(pf_context_t pf, bool flush_to_disk) {
     DEBUG_PF("pf %p, flush %d\n", pf, flush_to_disk);
     if (!pf->need_writing) {
         // no changes at all
@@ -832,13 +788,6 @@ bool ipf_internal_flush(pf_context_t pf, /*bool mc,*/ bool flush_to_disk) {
         return true;
     }
 
-/*
-    if (mc == true && encrypted_part_plain.mc_value > (UINT_MAX-2))
-    {
-        last_error = SGX_ERROR_FILE_MONOTONIC_COUNTER_AT_MAX;
-        return false;
-    }
-*/
     if (pf->encrypted_part_plain.size > MD_USER_DATA_SIZE && pf->root_mht.need_writing) {
         // otherwise it's just one write - the meta-data node
         if (pf->recovery_filename && pf->recovery_filename[0]) {
@@ -864,32 +813,8 @@ bool ipf_internal_flush(pf_context_t pf, /*bool mc,*/ bool flush_to_disk) {
         }
     }
 
-/*
-    sgx_status_t status;
-    if (mc == true)
-    {
-        // increase monotonic counter local value - only if everything is ok, we will increase the real counter
-        if (encrypted_part_plain.mc_value == 0)
-        {
-            // no monotonic counter so far, need to create a new one
-            status = sgx_create_monotonic_counter(&encrypted_part_plain.mc_uuid, &encrypted_part_plain.mc_value);
-            if (status != SGX_SUCCESS)
-            {
-                clear_update_flag();
-                file_status = SGX_FILE_STATUS_FLUSH_ERROR;
-                last_error = status;
-                return false;
-            }
-        }
-        encrypted_part_plain.mc_value++;
-    }
-*/
     if (_RECOVERY_HOOK_(3) || !ipf_update_meta_data_node(pf)) {
         ipf_clear_update_flag(pf);
-        /*
-        if (mc == true)
-            encrypted_part_plain.mc_value--; // don't have to do this as the file cannot be fixed, but doing it anyway to prevent future errors
-        */
         // this is something that shouldn't happen, can't fix this...
         pf->file_status = PF_STATUS_CRYPTO_ERROR;
         DEBUG_PF("failed to update metadata nodes\n");
@@ -898,11 +823,7 @@ bool ipf_internal_flush(pf_context_t pf, /*bool mc,*/ bool flush_to_disk) {
 
     if (_RECOVERY_HOOK_(4) || !ipf_write_all_changes_to_disk(pf, flush_to_disk))
     {
-        //if (mc == false)
-            // special case, need only to repeat write_all_changes_to_disk in order to repair it
-            pf->file_status = PF_STATUS_WRITE_TO_DISK_FAILED;
-        //else
-            //file_status = SGX_FILE_STATUS_WRITE_TO_DISK_FAILED_NEED_MC; // special case, need to repeat write_all_changes_to_disk AND increase the monotonic counter in order to repair it
+        pf->file_status = PF_STATUS_WRITE_TO_DISK_FAILED;
 
         DEBUG_PF("failed to write changes to disk\n");
         return false;
@@ -910,28 +831,6 @@ bool ipf_internal_flush(pf_context_t pf, /*bool mc,*/ bool flush_to_disk) {
 
     pf->need_writing = false;
 
-/* this is causing problems when we delete and create the file rapidly
-   we will just leave the file, and re-write it every time
-   u_sgxprotectedfs_recovery_file_open opens it with 'w' so it is truncated
-    if (encrypted_part_plain.size > MD_USER_DATA_SIZE)
-    {
-        erase_recovery_file();
-    }
-*/
-/*
-    if (mc == true)
-    {
-        uint32_t mc_value;
-        status = sgx_increment_monotonic_counter(&encrypted_part_plain.mc_uuid, &mc_value);
-        if (status != SGX_SUCCESS)
-        {
-            file_status = SGX_FILE_STATUS_MC_NOT_INCREMENTED; // special case - need only to increase the MC in order to repair it
-            last_error = status;
-            return false;
-        }
-        assert(mc_value == encrypted_part_plain.mc_value);
-    }
-*/
     return true;
 }
 
@@ -1166,7 +1065,6 @@ bool ipf_update_all_data_and_mht_nodes(pf_context_t pf) {
             plain.mht_nodes_crypto[(file_mht_node->mht_node_number - 1) % CHILD_MHT_NODES_COUNT];
 
         if (!ipf_derive_random_node_key(pf, file_mht_node->physical_node_number)) {
-            //mht_list.clear(); // not needed
             return false;
         }
 
@@ -1176,7 +1074,6 @@ bool ipf_update_all_data_and_mht_nodes(pf_context_t pf) {
                                            &file_mht_node->encrypted.cipher,
                                            &gcm_crypto_data->gmac);
         if (PF_FAILURE(status)) {
-            //mht_list.clear(); // not needed
             pf_last_error = status;
             return false;
         }
@@ -1354,7 +1251,7 @@ bool ipf_seek(pf_context_t pf, int64_t new_offset, int origin) {
             if (new_offset <= pf->encrypted_part_plain.size) {
                 pf->offset = new_offset;
                 result = true;
-            } else if (!pf->read_only) {
+            } else if (pf->mode & PF_FILE_MODE_WRITE) {
                 // need to extend the file
                 result = PF_SUCCESS(pf_set_size(pf, new_offset));
             }
@@ -1409,7 +1306,7 @@ void ipf_clear_error(pf_context_t pf) {
     }
 
     if (pf->file_status == PF_STATUS_FLUSH_ERROR) {
-        if (ipf_internal_flush(pf, /*false,*/ true))
+        if (ipf_internal_flush(pf, true))
             pf->file_status = PF_STATUS_SUCCESS;
     }
 
@@ -1419,32 +1316,6 @@ void ipf_clear_error(pf_context_t pf) {
             pf->file_status = PF_STATUS_SUCCESS;
         }
     }
-
-/*
-    if (file_status == SGX_FILE_STATUS_WRITE_TO_DISK_FAILED_NEED_MC)
-    {
-        if (write_all_changes_to_disk(true) == true)
-        {
-            need_writing = false;
-            file_status = SGX_FILE_STATUS_MC_NOT_INCREMENTED; // fall through...next 'if' should take care of this one
-        }
-    }
-    if ((file_status == SGX_FILE_STATUS_MC_NOT_INCREMENTED) &&
-        (encrypted_part_plain.mc_value <= (UINT_MAX-2)))
-    {
-        uint32_t mc_value;
-        sgx_status_t status = sgx_increment_monotonic_counter(&encrypted_part_plain.mc_uuid, &mc_value);
-        if (status == SGX_SUCCESS)
-        {
-            assert(mc_value == encrypted_part_plain.mc_value);
-            file_status = SGX_FILE_STATUS_OK;
-        }
-        else
-        {
-            last_error = status;
-        }
-    }
-*/
 
     if (pf->file_status == PF_STATUS_SUCCESS) {
         pf_last_error = PF_STATUS_SUCCESS;
@@ -1457,7 +1328,7 @@ bool ipf_clear_cache(pf_context_t pf) {
     if (PF_FAILURE(pf->file_status)) {
         ipf_clear_error(pf); // attempt to fix the file, will also flush it
     } else {
-        ipf_internal_flush(pf, /*false,*/ true);
+        ipf_internal_flush(pf, true);
     }
 
     if (PF_FAILURE(pf->file_status)) {
@@ -1800,7 +1671,7 @@ file_data_node_t* ipf_get_data_node(pf_context_t pf) {
                 cb_free(file_mht_node);
             }
         } else {
-            if (!ipf_internal_flush(pf, /*false,*/ false)) {
+            if (!ipf_internal_flush(pf, false)) {
                 // error, can't flush cache, file status changed to error
                 assert(pf->file_status != PF_STATUS_SUCCESS);
                 if (pf->file_status == PF_STATUS_SUCCESS)
