@@ -937,6 +937,7 @@ bool mht_sort(const void* first, const void* second) {
             ((file_node_t*)second)->node_number);
 }
 
+// TODO: faster sort
 #define LISTP_SORT(LISTP, STRUCT_NAME, SORT_FUNC)                                       \
     do {                                                                                \
         struct STRUCT_NAME* head  = NULL;                                               \

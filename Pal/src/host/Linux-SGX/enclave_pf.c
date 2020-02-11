@@ -112,7 +112,7 @@ static pf_status_t cb_flush(pf_handle_t handle) {
 }
 
 static pf_status_t cb_open(const char* path, pf_file_mode_t mode, pf_handle_t* handle, size_t* size) {
-    // TODO
+    // TODO (only used for recovery files)
     __UNUSED(path);
     __UNUSED(mode);
     __UNUSED(handle);

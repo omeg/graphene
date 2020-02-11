@@ -54,10 +54,6 @@
 #include <list.h>
 #include "lru_cache.h"
 
-#ifndef __UNUSED
-#define __UNUSED(x) do { (void)(x); } while (0)
-#endif
-
 #pragma pack(push, 1)
 
 /*! Size of the AES-GCM encryption key */
@@ -75,32 +71,31 @@ typedef uint8_t pf_key_t[PF_KEY_SIZE];
 typedef uint8_t pf_keyid_t[32];
 
 typedef enum _pf_status_t {
-    PF_STATUS_SUCCESS           = 0,
-    PF_STATUS_UNKNOWN_ERROR     = -1,
-    PF_STATUS_UNINITIALIZED     = -2,
-    PF_STATUS_INVALID_PARAMETER = -3,
-    PF_STATUS_INVALID_MODE      = -4,
-    PF_STATUS_INVALID_CONTEXT   = -5,
-    PF_STATUS_NO_MEMORY         = -6,
-    PF_STATUS_INVALID_VERSION   = -7,
-    PF_STATUS_INVALID_HEADER    = -8,
-    PF_STATUS_INVALID_PATH      = -9,
-    PF_STATUS_MAC_MISMATCH      = -10,
-    PF_STATUS_NOT_IMPLEMENTED   = -11,
-    PF_STATUS_CALLBACK_FAILED   = -12,
-    PF_STATUS_PATH_TOO_LONG     = -13,
-    PF_STATUS_RECOVERY_NEEDED   = -14,
-    PF_STATUS_FLUSH_ERROR       = -15,
-    PF_STATUS_CRYPTO_ERROR      = -16,
-    PF_STATUS_CORRUPTED         = -17,
-    PF_STATUS_WRITE_TO_DISK_FAILED = -18,
-    PF_STATUS_RECOVERY_IMPOSSIBLE  = -19,
+    PF_STATUS_SUCCESS              = 0,
+    PF_STATUS_UNKNOWN_ERROR        = -1,
+    PF_STATUS_UNINITIALIZED        = -2,
+    PF_STATUS_INVALID_PARAMETER    = -3,
+    PF_STATUS_INVALID_MODE         = -4,
+    PF_STATUS_NO_MEMORY            = -5,
+    PF_STATUS_INVALID_VERSION      = -6,
+    PF_STATUS_INVALID_HEADER       = -7,
+    PF_STATUS_INVALID_PATH         = -8,
+    PF_STATUS_MAC_MISMATCH         = -9,
+    PF_STATUS_NOT_IMPLEMENTED      = -10,
+    PF_STATUS_CALLBACK_FAILED      = -11,
+    PF_STATUS_PATH_TOO_LONG        = -12,
+    PF_STATUS_RECOVERY_NEEDED      = -13,
+    PF_STATUS_FLUSH_ERROR          = -14,
+    PF_STATUS_CRYPTO_ERROR         = -15,
+    PF_STATUS_CORRUPTED            = -16,
+    PF_STATUS_WRITE_TO_DISK_FAILED = -17,
+    PF_STATUS_RECOVERY_IMPOSSIBLE  = -18,
 } pf_status_t;
 
 #define PF_SUCCESS(status) ((status) == PF_STATUS_SUCCESS)
 #define PF_FAILURE(status) ((status) != PF_STATUS_SUCCESS)
 
-/*! PF open/map modes */
+/*! PF open modes */
 typedef enum _pf_file_mode_t {
     PF_FILE_MODE_READ  = 1,
     PF_FILE_MODE_WRITE = 2,
@@ -329,7 +324,7 @@ typedef struct _meta_data_node {
     meta_data_padding_t        padding;
 } meta_data_node_t;
 
-static_assert(sizeof(meta_data_node_t) == NODE_SIZE, "sizeof_meta_data_node_t");
+static_assert(sizeof(meta_data_node_t) == NODE_SIZE, "sizeof(meta_data_node_t)");
 
 typedef struct _data_node_crypto {
     pf_key_t key;
@@ -341,29 +336,29 @@ typedef struct _data_node_crypto {
 // for NODE_SIZE == 1024, we have 24 attached data nodes and 8 mht child nodes
 // 3/4 of the node size is dedicated to data nodes
 #define ATTACHED_DATA_NODES_COUNT ((NODE_SIZE/sizeof(gcm_crypto_data_t))*3/4)
-static_assert(ATTACHED_DATA_NODES_COUNT == 96, "attached_data_nodes_count");
+static_assert(ATTACHED_DATA_NODES_COUNT == 96, "ATTACHED_DATA_NODES_COUNT");
 // 1/4 of the node size is dedicated to child mht nodes
 #define CHILD_MHT_NODES_COUNT ((NODE_SIZE/sizeof(gcm_crypto_data_t))*1/4)
-static_assert(CHILD_MHT_NODES_COUNT == 32, "child_mht_nodes_count");
+static_assert(CHILD_MHT_NODES_COUNT == 32, "CHILD_MHT_NODES_COUNT");
 
 typedef struct _mht_node {
     gcm_crypto_data_t data_nodes_crypto[ATTACHED_DATA_NODES_COUNT];
     gcm_crypto_data_t mht_nodes_crypto[CHILD_MHT_NODES_COUNT];
 } mht_node_t;
 
-static_assert(sizeof(mht_node_t) == NODE_SIZE, "sizeof_mht_node_t");
+static_assert(sizeof(mht_node_t) == NODE_SIZE, "sizeof(mht_node_t)");
 
 typedef struct _data_node {
     uint8_t data[NODE_SIZE];
 } data_node_t;
 
-static_assert(sizeof(data_node_t) == NODE_SIZE, "sizeof_data_node_t");
+static_assert(sizeof(data_node_t) == NODE_SIZE, "sizeof(data_node_t)");
 
 typedef struct _encrypted_node {
     uint8_t cipher[NODE_SIZE];
 } encrypted_node_t;
 
-static_assert(sizeof(encrypted_node_t) == NODE_SIZE, "sizeof_encrypted_node_t");
+static_assert(sizeof(encrypted_node_t) == NODE_SIZE, "sizeof(encrypted_node_t)");
 
 typedef struct _recovery_node {
     uint64_t physical_node_number;
