@@ -397,7 +397,7 @@ bool ipf_init_fields(pf_context_t pf) {
 
     pf->root_mht.type = FILE_MHT_NODE_TYPE;
     pf->root_mht.physical_node_number = 1;
-    pf->root_mht.mht_node_number = 0;
+    pf->root_mht.node_number = 0;
     pf->root_mht.new_node = true;
     pf->root_mht.need_writing = false;
 
@@ -648,6 +648,8 @@ bool ipf_init_existing_file(pf_context_t pf, const char* filename) {
         return false;
     }
 
+    DEBUG_PF("data size %lu\n", pf->encrypted_part_plain.size);
+
     if (filename) {
         size_t name_len = strnlen(pf->encrypted_part_plain.clean_filename, FILENAME_MAX_LEN);
         if (name_len != strnlen(filename, FILENAME_MAX_LEN) ||
@@ -666,7 +668,7 @@ bool ipf_init_existing_file(pf_context_t pf, const char* filename) {
         status = cb_crypto_aes_gcm_decrypt(&pf->encrypted_part_plain.mht_key, &empty_iv,
                                            NULL, 0, // aad
                                            &pf->root_mht.encrypted.cipher, NODE_SIZE,
-                                           &pf->root_mht.plain,
+                                           &pf->root_mht.mht_plain,
                                            &pf->encrypted_part_plain.mht_gmac);
         if (PF_FAILURE(status)) {
             pf_last_error = status;
@@ -704,16 +706,10 @@ bool ipf_close(pf_context_t pf) {
     }
 
     while ((data = lruc_get_last(pf->cache)) != NULL) {
-        if (((file_data_node_t*)data)->type == FILE_DATA_NODE_TYPE) {
-            // type is in the same offset in both node types, need to scrub the plaintext
-            file_data_node_t* file_data_node = (file_data_node_t*)data;
-            erase_memory(&file_data_node->plain, sizeof(data_node_t));
-            cb_free(file_data_node);
-        } else {
-            file_mht_node_t* file_mht_node = (file_mht_node_t*)data;
-            erase_memory(&file_mht_node->plain, sizeof(mht_node_t));
-            cb_free(file_mht_node);
-        }
+        file_node_t* file_node = (file_node_t*)data;
+        // data portion is the same size for data and mht nodes
+        erase_memory(&file_node->data_plain, sizeof(file_node->data_plain));
+        cb_free(file_node);
         lruc_remove_last(pf->cache);
     }
 
@@ -854,21 +850,11 @@ bool ipf_write_recovery_file(pf_context_t pf) {
 
     uint64_t node_number = 0;
     for (data = lruc_get_first(pf->cache); data != NULL; data = lruc_get_next(pf->cache)) {
-        if (((file_data_node_t*)data)->type == FILE_DATA_NODE_TYPE) {
-            // type is in the same offset in both node types
-            file_data_node_t* file_data_node = (file_data_node_t*)data;
-            if (!file_data_node->need_writing || file_data_node->new_node)
-                continue;
+        file_node_t* file_node = (file_node_t*)data;
+        if (!file_node->need_writing || file_node->new_node)
+            continue;
 
-            recovery_node = &file_data_node->recovery_node;
-        } else {
-            file_mht_node_t* file_mht_node = (file_mht_node_t*)data;
-            assert(file_mht_node->type == FILE_MHT_NODE_TYPE);
-            if (!file_mht_node->need_writing || file_mht_node->new_node)
-                continue;
-
-            recovery_node = &file_mht_node->recovery_node;
-        }
+        recovery_node = &file_node->recovery_node;
 
         if (!ipf_write_node(pf, recovery_file, node_number, recovery_node, sizeof(*recovery_node))) {
             cb_close(recovery_file);
@@ -947,8 +933,8 @@ bool mht_sort(const void* first, const void* second) {
     if (!first || !second)
         return false;
 
-    return (((file_mht_node_t*)first)->mht_node_number >
-            ((file_mht_node_t*)second)->mht_node_number);
+    return (((file_node_t*)first)->node_number >
+            ((file_node_t*)second)->node_number);
 }
 
 #define LISTP_SORT(LISTP, STRUCT_NAME, SORT_FUNC)                                       \
@@ -991,8 +977,8 @@ bool mht_sort(const void* first, const void* second) {
 
 bool ipf_update_all_data_and_mht_nodes(pf_context_t pf) {
     DEBUG_PF("pf %p\n", pf);
-    LISTP_TYPE(_file_mht_node) mht_list = LISTP_INIT;
-    file_mht_node_t* file_mht_node;
+    LISTP_TYPE(_file_node) mht_list = LISTP_INIT;
+    file_node_t* file_mht_node;
     pf_status_t status;
     void* data = lruc_get_first(pf->cache);
 
@@ -1000,21 +986,20 @@ bool ipf_update_all_data_and_mht_nodes(pf_context_t pf) {
     // 2. set the IV+GMAC in the parent MHT
     // [3. set the need_writing flag for all the parents]
     while (data != NULL) {
-        if (((file_data_node_t*)data)->type == FILE_DATA_NODE_TYPE) {
-            // type is in the same offset in both node types
-            file_data_node_t* data_node = (file_data_node_t*)data;
+        if (((file_node_t*)data)->type == FILE_DATA_NODE_TYPE) {
+            file_node_t* data_node = (file_node_t*)data;
 
             if (data_node->need_writing) {
                 if (!ipf_derive_random_node_key(pf, data_node->physical_node_number))
                     return false;
 
-                gcm_crypto_data_t* gcm_crypto_data = &data_node->parent->
-                    plain.data_nodes_crypto[data_node->data_node_number % ATTACHED_DATA_NODES_COUNT];
+                gcm_crypto_data_t* gcm_crypto_data = &data_node->parent->mht_plain.
+                    data_nodes_crypto[data_node->node_number % ATTACHED_DATA_NODES_COUNT];
 
                 // encrypt the data, this also saves the gmac of the operation in the mht crypto node
                 status = cb_crypto_aes_gcm_encrypt(&pf->cur_key, &empty_iv,
                                                    NULL, 0, // aad
-                                                   data_node->plain.data, NODE_SIZE,
+                                                   data_node->data_plain.data, NODE_SIZE,
                                                    data_node->encrypted.cipher,
                                                    &gcm_crypto_data->gmac);
                 if (PF_FAILURE(status)) {
@@ -1027,7 +1012,7 @@ bool ipf_update_all_data_and_mht_nodes(pf_context_t pf) {
 
                 file_mht_node = data_node->parent;
                 // this loop should do nothing, add it here just to be safe
-                while (file_mht_node->mht_node_number != 0) {
+                while (file_mht_node->node_number != 0) {
                     assert(file_mht_node->need_writing == true);
                     file_mht_node->need_writing = true; // just in case, for release
                     file_mht_node = file_mht_node->parent;
@@ -1040,9 +1025,9 @@ bool ipf_update_all_data_and_mht_nodes(pf_context_t pf) {
     // add all the mht nodes that needs writing to a list
     data = lruc_get_first(pf->cache);
     while (data != NULL) {
-        if (((file_mht_node_t*)data)->type == FILE_MHT_NODE_TYPE) {
+        if (((file_node_t*)data)->type == FILE_MHT_NODE_TYPE) {
             // type is in the same offset in both node types
-            file_mht_node = (file_mht_node_t*)data;
+            file_mht_node = (file_node_t*)data;
 
             if (file_mht_node->need_writing)
                 LISTP_ADD(file_mht_node, &mht_list, list);
@@ -1052,17 +1037,17 @@ bool ipf_update_all_data_and_mht_nodes(pf_context_t pf) {
     }
 
     // sort the list from the last node to the first (bottom layers first)
-    LISTP_SORT(&mht_list, _file_mht_node, mht_sort);
+    LISTP_SORT(&mht_list, _file_node, mht_sort);
 
     // update the gmacs in the parents
-    struct _file_mht_node* node;
-    struct _file_mht_node* tmp;
+    struct _file_node* node;
+    struct _file_node* tmp;
 
     LISTP_FOR_EACH_ENTRY_SAFE(node, tmp, &mht_list, list) {
         file_mht_node = node;
 
         gcm_crypto_data_t* gcm_crypto_data = &file_mht_node->parent->
-            plain.mht_nodes_crypto[(file_mht_node->mht_node_number - 1) % CHILD_MHT_NODES_COUNT];
+            mht_plain.mht_nodes_crypto[(file_mht_node->node_number - 1) % CHILD_MHT_NODES_COUNT];
 
         if (!ipf_derive_random_node_key(pf, file_mht_node->physical_node_number)) {
             return false;
@@ -1070,7 +1055,7 @@ bool ipf_update_all_data_and_mht_nodes(pf_context_t pf) {
 
         status = cb_crypto_aes_gcm_encrypt(&pf->cur_key, &empty_iv,
                                            NULL, 0,
-                                           &file_mht_node->plain, NODE_SIZE,
+                                           &file_mht_node->mht_plain, NODE_SIZE,
                                            &file_mht_node->encrypted.cipher,
                                            &gcm_crypto_data->gmac);
         if (PF_FAILURE(status)) {
@@ -1090,7 +1075,7 @@ bool ipf_update_all_data_and_mht_nodes(pf_context_t pf) {
 
     status = cb_crypto_aes_gcm_encrypt(&pf->cur_key, &empty_iv,
                                        NULL, 0,
-                                       &pf->root_mht.plain, NODE_SIZE,
+                                       &pf->root_mht.mht_plain, NODE_SIZE,
                                        &pf->root_mht.encrypted.cipher,
                                        &pf->encrypted_part_plain.mht_gmac);
     if (PF_FAILURE(status)) {
@@ -1136,32 +1121,19 @@ bool ipf_write_all_changes_to_disk(pf_context_t pf, bool flush_to_disk) {
         void* data = NULL;
         uint8_t* data_to_write;
         uint64_t node_number;
-        file_data_node_t* file_data_node;
-        file_mht_node_t* file_mht_node;
+        file_node_t* file_node;
 
         for (data = lruc_get_first(pf->cache); data != NULL; data = lruc_get_next(pf->cache)) {
-            file_data_node = NULL;
-            file_mht_node = NULL;
+            file_node = NULL;
 
-            if (((file_data_node_t*)data)->type == FILE_DATA_NODE_TYPE) {
-                // type is in the same offset in both node types
-                file_data_node = (file_data_node_t*)data;
-                if (!file_data_node->need_writing)
-                    continue;
+            file_node = (file_node_t*)data;
+            if (!file_node->need_writing)
+                continue;
 
-                data_to_write = (uint8_t*)&file_data_node->encrypted;
-                node_number = file_data_node->physical_node_number;
-            } else {
-                file_mht_node = (file_mht_node_t*)data;
-                DEBUG_PF("node %lu, type %d, parent %p\n",
-                    file_mht_node->mht_node_number, file_mht_node->type, file_mht_node->parent);
-                assert(file_mht_node->type == FILE_MHT_NODE_TYPE);
-                if (!file_mht_node->need_writing)
-                    continue;
-
-                data_to_write = (uint8_t*)&file_mht_node->encrypted;
-                node_number = file_mht_node->physical_node_number;
-            }
+            data_to_write = (uint8_t*)&file_node->encrypted;
+            node_number = file_node->physical_node_number;
+            DEBUG_PF("node %lu, type %d, parent %p\n",
+                file_node->node_number, file_node->type, file_node->parent);
 
             if (!ipf_write_node(pf, pf->file, node_number, data_to_write, NODE_SIZE)) {
                 return false;
@@ -1170,13 +1142,8 @@ bool ipf_write_all_changes_to_disk(pf_context_t pf, bool flush_to_disk) {
             // data written - clear the need_writing and the new_node flags
             // (for future transactions, this node it no longer 'new' and should be written
             // to recovery file)
-            if (file_data_node != NULL) {
-                file_data_node->need_writing = false;
-                file_data_node->new_node = false;
-            } else {
-                file_mht_node->need_writing = false;
-                file_mht_node->new_node = false;
-            }
+            file_node->need_writing = false;
+            file_node->new_node = false;
         }
 
         if (!ipf_write_node(pf, pf->file, 1, &pf->root_mht.encrypted, NODE_SIZE)) {
@@ -1259,14 +1226,16 @@ bool ipf_seek(pf_context_t pf, int64_t new_offset, int origin) {
         break;
 
     case SEEK_CUR:
-        if ((pf->offset + new_offset) >= 0 && (pf->offset + new_offset) <= pf->encrypted_part_plain.size) {
+        if (pf->offset + new_offset >= 0 && pf->offset + new_offset <=
+            pf->encrypted_part_plain.size) {
+
             pf->offset += new_offset;
             result = true;
         }
         break;
 
     case SEEK_END:
-        if (new_offset <= 0 && new_offset >= (0 - pf->encrypted_part_plain.size)) {
+        if (new_offset <= 0 && new_offset >= 0 - pf->encrypted_part_plain.size) {
             pf->offset = pf->encrypted_part_plain.size + new_offset;
             result = true;
         }
@@ -1340,26 +1309,19 @@ bool ipf_clear_cache(pf_context_t pf) {
         void* data = lruc_get_last(pf->cache);
 
         assert(data != NULL);
-        // need_writing is in the same offset in both node types
-        assert(((file_data_node_t*)data)->need_writing == false);
+        assert(((file_node_t*)data)->need_writing == false);
         // for production -
-        if (data == NULL || ((file_data_node_t*)data)->need_writing) {
+        if (data == NULL || ((file_node_t*)data)->need_writing) {
             return false;
         }
 
         lruc_remove_last(pf->cache);
 
         // before deleting the memory, need to scrub the plain secrets
-        if (((file_data_node_t*)data)->type == FILE_DATA_NODE_TYPE) {
-            // type is in the same offset in both node types
-            file_data_node_t* file_data_node = (file_data_node_t*)data;
-            erase_memory(&file_data_node->plain, sizeof(file_data_node->plain));
-            cb_free(file_data_node);
-        } else {
-            file_mht_node_t* file_mht_node = (file_mht_node_t*)data;
-            erase_memory(&file_mht_node->plain, sizeof(file_mht_node->plain));
-            cb_free(file_mht_node);
-        }
+        file_node_t* file_node = (file_node_t*)data;
+        // data portion is the same size for data and mht nodes
+        erase_memory(&file_node->data_plain, sizeof(file_node->data_plain));
+        cb_free(file_node);
     }
 
     return true;
@@ -1424,7 +1386,7 @@ size_t ipf_write(pf_context_t pf, const void* ptr, size_t size) {
     }
 
     while (data_left_to_write > 0) {
-        file_data_node_t* file_data_node = NULL;
+        file_node_t* file_data_node = NULL;
         // return the data node of the current offset, will read it from disk or create new one
         // if needed (and also the mht node if needed)
         file_data_node = ipf_get_data_node(pf);
@@ -1438,14 +1400,14 @@ size_t ipf_write(pf_context_t pf, const void* ptr, size_t size) {
 
         if (data_left_to_write <= empty_place_left_in_node) {
             // this will be the last write
-            memcpy_or_zero(&file_data_node->plain.data[offset_in_node], data_to_write,
+            memcpy_or_zero(&file_data_node->data_plain.data[offset_in_node], data_to_write,
                            data_left_to_write);
             pf->offset += data_left_to_write;
             if (data_to_write)
                 data_to_write += data_left_to_write; // not needed, to prevent future errors
             data_left_to_write = 0;
         } else {
-            memcpy_or_zero(&file_data_node->plain.data[offset_in_node], data_to_write,
+            memcpy_or_zero(&file_data_node->data_plain.data[offset_in_node], data_to_write,
                            empty_place_left_in_node);
             pf->offset += empty_place_left_in_node;
             if (data_to_write)
@@ -1459,8 +1421,8 @@ size_t ipf_write(pf_context_t pf, const void* ptr, size_t size) {
 
         if (!file_data_node->need_writing) {
             file_data_node->need_writing = true;
-            file_mht_node_t* file_mht_node = file_data_node->parent;
-            while (file_mht_node->mht_node_number != 0) {
+            file_node_t* file_mht_node = file_data_node->parent;
+            while (file_mht_node->node_number != 0) {
                 // set all the mht parent nodes as 'need writing'
                 file_mht_node->need_writing = true;
                 file_mht_node = file_mht_node->parent;
@@ -1532,7 +1494,7 @@ size_t ipf_read(pf_context_t pf, void* ptr, size_t size) {
     }
 
     while (data_left_to_read > 0) {
-        file_data_node_t* file_data_node = NULL;
+        file_node_t* file_data_node = NULL;
         // return the data node of the current offset, will read it from disk if needed
         // (and also the mht node if needed)
         file_data_node = ipf_get_data_node(pf);
@@ -1543,12 +1505,12 @@ size_t ipf_read(pf_context_t pf, void* ptr, size_t size) {
         size_t data_left_in_node = NODE_SIZE - offset_in_node;
 
         if (data_left_to_read <= data_left_in_node) {
-            memcpy(out_buffer, &file_data_node->plain.data[offset_in_node], data_left_to_read);
+            memcpy(out_buffer, &file_data_node->data_plain.data[offset_in_node], data_left_to_read);
             pf->offset += data_left_to_read;
             out_buffer += data_left_to_read; // not needed, to prevent future errors
             data_left_to_read = 0;
         } else {
-            memcpy(out_buffer, &file_data_node->plain.data[offset_in_node], data_left_in_node);
+            memcpy(out_buffer, &file_data_node->data_plain.data[offset_in_node], data_left_in_node);
             pf->offset += data_left_in_node;
             out_buffer += data_left_in_node;
             data_left_to_read -= data_left_in_node;
@@ -1604,8 +1566,8 @@ void get_node_numbers(uint64_t offset, uint64_t* mht_node_number, uint64_t* data
         *physical_data_node_number = _physical_data_node_number;
 }
 
-file_data_node_t* ipf_get_data_node(pf_context_t pf) {
-    file_data_node_t* file_data_node = NULL;
+file_node_t* ipf_get_data_node(pf_context_t pf) {
+    file_node_t* file_data_node = NULL;
 
     DEBUG_PF("pf %p\n", pf);
     if (pf->offset < MD_USER_DATA_SIZE) {
@@ -1624,8 +1586,8 @@ file_data_node_t* ipf_get_data_node(pf_context_t pf) {
 
     // bump all the parents mht to reside before the data node in the cache
     if (file_data_node != NULL) {
-        file_mht_node_t* file_mht_node = file_data_node->parent;
-        while (file_mht_node->mht_node_number != 0) {
+        file_node_t* file_mht_node = file_data_node->parent;
+        while (file_mht_node->node_number != 0) {
             // bump the mht node to the head of the lru
             lruc_get(pf->cache, file_mht_node->physical_node_number);
             file_mht_node = file_mht_node->parent;
@@ -1642,21 +1604,14 @@ file_data_node_t* ipf_get_data_node(pf_context_t pf) {
             return NULL;
         }
 
-        if (((file_data_node_t*)data)->need_writing == false) {
-            // need_writing is in the same offset in both node types
+        if (!((file_node_t*)data)->need_writing) {
             lruc_remove_last(pf->cache);
 
             // before deleting the memory, need to scrub the plain secrets
-            if (((file_data_node_t*)data)->type == FILE_DATA_NODE_TYPE) {
-                // type is in the same offset in both node types
-                file_data_node_t* file_data_node1 = (file_data_node_t*)data;
-                erase_memory(&file_data_node1->plain, sizeof(file_data_node1->plain));
-                cb_free(file_data_node1);
-            } else {
-                file_mht_node_t* file_mht_node = (file_mht_node_t*)data;
-                erase_memory(&file_mht_node->plain, sizeof(file_mht_node->plain));
-                cb_free(file_mht_node);
-            }
+            file_node_t* file_node = (file_node_t*)data;
+            // data portion is the same size for data and mht nodes
+            erase_memory(&file_node->data_plain, sizeof(file_node->data_plain));
+            cb_free(file_node);
         } else {
             if (!ipf_internal_flush(pf, false)) {
                 // error, can't flush cache, file status changed to error
@@ -1671,14 +1626,14 @@ file_data_node_t* ipf_get_data_node(pf_context_t pf) {
     return file_data_node;
 }
 
-file_data_node_t* ipf_append_data_node(pf_context_t pf) {
+file_node_t* ipf_append_data_node(pf_context_t pf) {
     DEBUG_PF("pf %p\n", pf);
 
-    file_mht_node_t* file_mht_node = ipf_get_mht_node(pf);
+    file_node_t* file_mht_node = ipf_get_mht_node(pf);
     if (file_mht_node == NULL) // some error happened
         return NULL;
 
-    file_data_node_t* new_file_data_node = NULL;
+    file_node_t* new_file_data_node = NULL;
 
     new_file_data_node = cb_malloc(sizeof(*new_file_data_node));
     if (!new_file_data_node) {
@@ -1690,7 +1645,7 @@ file_data_node_t* ipf_append_data_node(pf_context_t pf) {
     new_file_data_node->type = FILE_DATA_NODE_TYPE;
     new_file_data_node->new_node = true;
     new_file_data_node->parent = file_mht_node;
-    get_node_numbers(pf->offset, NULL, &new_file_data_node->data_node_number, NULL,
+    get_node_numbers(pf->offset, NULL, &new_file_data_node->node_number, NULL,
                      &new_file_data_node->physical_node_number);
 
     if (!lruc_add(pf->cache, new_file_data_node->physical_node_number, new_file_data_node)) {
@@ -1702,17 +1657,17 @@ file_data_node_t* ipf_append_data_node(pf_context_t pf) {
     return new_file_data_node;
 }
 
-file_data_node_t* ipf_read_data_node(pf_context_t pf) {
+file_node_t* ipf_read_data_node(pf_context_t pf) {
     DEBUG_PF("pf %p\n", pf);
 
     uint64_t data_node_number;
     uint64_t physical_node_number;
-    file_mht_node_t* file_mht_node;
+    file_node_t* file_mht_node;
     pf_status_t status;
 
     get_node_numbers(pf->offset, NULL, &data_node_number, NULL, &physical_node_number);
 
-    file_data_node_t* file_data_node = (file_data_node_t*)lruc_get(pf->cache, physical_node_number);
+    file_node_t* file_data_node = (file_node_t*)lruc_get(pf->cache, physical_node_number);
     if (file_data_node != NULL)
         return file_data_node;
 
@@ -1729,7 +1684,7 @@ file_data_node_t* ipf_read_data_node(pf_context_t pf) {
     }
     memset(file_data_node, 0, sizeof(*file_data_node));
     file_data_node->type = FILE_DATA_NODE_TYPE;
-    file_data_node->data_node_number = data_node_number;
+    file_data_node->node_number = data_node_number;
     file_data_node->physical_node_number = physical_node_number;
     file_data_node->parent = file_mht_node;
 
@@ -1740,13 +1695,13 @@ file_data_node_t* ipf_read_data_node(pf_context_t pf) {
     }
 
     gcm_crypto_data_t* gcm_crypto_data = &file_data_node->parent
-        ->plain.data_nodes_crypto[file_data_node->data_node_number % ATTACHED_DATA_NODES_COUNT];
+        ->mht_plain.data_nodes_crypto[file_data_node->node_number % ATTACHED_DATA_NODES_COUNT];
 
     // this function decrypt the data _and_ checks the integrity of the data against the gmac
     status = cb_crypto_aes_gcm_decrypt(&gcm_crypto_data->key, &empty_iv,
                                        NULL, 0,
                                        file_data_node->encrypted.cipher, NODE_SIZE,
-                                       file_data_node->plain.data,
+                                       file_data_node->data_plain.data,
                                        &gcm_crypto_data->gmac);
 
     if (PF_FAILURE(status)) {
@@ -1759,7 +1714,7 @@ file_data_node_t* ipf_read_data_node(pf_context_t pf) {
 
     if (!lruc_add(pf->cache, file_data_node->physical_node_number, file_data_node)) {
         // scrub the plaintext data
-        erase_memory(&file_data_node->plain, sizeof(file_data_node->plain));
+        erase_memory(&file_data_node->data_plain, sizeof(file_data_node->data_plain));
         cb_free(file_data_node);
         pf_last_error = PF_STATUS_NO_MEMORY;
         return NULL;
@@ -1768,10 +1723,10 @@ file_data_node_t* ipf_read_data_node(pf_context_t pf) {
     return file_data_node;
 }
 
-file_mht_node_t* ipf_get_mht_node(pf_context_t pf) {
+file_node_t* ipf_get_mht_node(pf_context_t pf) {
     DEBUG_PF("pf %p\n", pf);
 
-    file_mht_node_t* file_mht_node;
+    file_node_t* file_mht_node;
     uint64_t mht_node_number;
     uint64_t physical_mht_node_number;
 
@@ -1796,10 +1751,10 @@ file_mht_node_t* ipf_get_mht_node(pf_context_t pf) {
     return file_mht_node;
 }
 
-file_mht_node_t* ipf_append_mht_node(pf_context_t pf, uint64_t mht_node_number) {
+file_node_t* ipf_append_mht_node(pf_context_t pf, uint64_t mht_node_number) {
     DEBUG_PF("pf %p, node %lu\n", pf, mht_node_number);
 
-    file_mht_node_t* parent_file_mht_node =
+    file_node_t* parent_file_mht_node =
         ipf_read_mht_node(pf, (mht_node_number - 1) / CHILD_MHT_NODES_COUNT);
 
     if (parent_file_mht_node == NULL) // some error happened
@@ -1809,7 +1764,7 @@ file_mht_node_t* ipf_append_mht_node(pf_context_t pf, uint64_t mht_node_number) 
                                     // the '1' is for the mht node preceding every 96 data nodes
                                     mht_node_number * (1 + ATTACHED_DATA_NODES_COUNT);
 
-    file_mht_node_t* new_file_mht_node = NULL;
+    file_node_t* new_file_mht_node = NULL;
     new_file_mht_node = cb_malloc(sizeof(*new_file_mht_node));
     if (!new_file_mht_node) {
         pf_last_error = PF_STATUS_NO_MEMORY;
@@ -1820,7 +1775,7 @@ file_mht_node_t* ipf_append_mht_node(pf_context_t pf, uint64_t mht_node_number) 
     new_file_mht_node->type = FILE_MHT_NODE_TYPE;
     new_file_mht_node->new_node = true;
     new_file_mht_node->parent = parent_file_mht_node;
-    new_file_mht_node->mht_node_number = mht_node_number;
+    new_file_mht_node->node_number = mht_node_number;
     new_file_mht_node->physical_node_number = physical_node_number;
 
     if (!lruc_add(pf->cache, new_file_mht_node->physical_node_number, new_file_mht_node)) {
@@ -1832,7 +1787,7 @@ file_mht_node_t* ipf_append_mht_node(pf_context_t pf, uint64_t mht_node_number) 
     return new_file_mht_node;
 }
 
-file_mht_node_t* ipf_read_mht_node(pf_context_t pf, uint64_t mht_node_number) {
+file_node_t* ipf_read_mht_node(pf_context_t pf, uint64_t mht_node_number) {
     pf_status_t status;
 
     DEBUG_PF("pf %p, node %lu\n", pf, mht_node_number);
@@ -1843,11 +1798,11 @@ file_mht_node_t* ipf_read_mht_node(pf_context_t pf, uint64_t mht_node_number) {
                                     // the '1' is for the mht node preceding every 96 data nodes
                                     mht_node_number * (1 + ATTACHED_DATA_NODES_COUNT);
 
-    file_mht_node_t* file_mht_node = (file_mht_node_t*)lruc_find(pf->cache, physical_node_number);
+    file_node_t* file_mht_node = (file_node_t*)lruc_find(pf->cache, physical_node_number);
     if (file_mht_node != NULL)
         return file_mht_node;
 
-    file_mht_node_t* parent_file_mht_node =
+    file_node_t* parent_file_mht_node =
         ipf_read_mht_node(pf, (mht_node_number - 1) / CHILD_MHT_NODES_COUNT);
 
     if (parent_file_mht_node == NULL) // some error happened
@@ -1861,7 +1816,7 @@ file_mht_node_t* ipf_read_mht_node(pf_context_t pf, uint64_t mht_node_number) {
 
     memset(file_mht_node, 0, sizeof(*file_mht_node));
     file_mht_node->type = FILE_MHT_NODE_TYPE;
-    file_mht_node->mht_node_number = mht_node_number;
+    file_mht_node->node_number = mht_node_number;
     file_mht_node->physical_node_number = physical_node_number;
     file_mht_node->parent = parent_file_mht_node;
 
@@ -1872,13 +1827,13 @@ file_mht_node_t* ipf_read_mht_node(pf_context_t pf, uint64_t mht_node_number) {
     }
 
     gcm_crypto_data_t* gcm_crypto_data = &file_mht_node->parent
-        ->plain.mht_nodes_crypto[(file_mht_node->mht_node_number - 1) % CHILD_MHT_NODES_COUNT];
+        ->mht_plain.mht_nodes_crypto[(file_mht_node->node_number - 1) % CHILD_MHT_NODES_COUNT];
 
     // this function decrypt the data _and_ checks the integrity of the data against the gmac
     status = cb_crypto_aes_gcm_decrypt(&gcm_crypto_data->key, &empty_iv,
                                        NULL, 0,
                                        file_mht_node->encrypted.cipher, NODE_SIZE,
-                                       &file_mht_node->plain,
+                                       &file_mht_node->mht_plain,
                                        &gcm_crypto_data->gmac);
     if (PF_FAILURE(status)) {
         cb_free(file_mht_node);
@@ -1889,7 +1844,7 @@ file_mht_node_t* ipf_read_mht_node(pf_context_t pf, uint64_t mht_node_number) {
     }
 
     if (!lruc_add(pf->cache, file_mht_node->physical_node_number, file_mht_node)) {
-        erase_memory(&file_mht_node->plain, sizeof(file_mht_node->plain));
+        erase_memory(&file_mht_node->mht_plain, sizeof(file_mht_node->mht_plain));
         cb_free(file_mht_node);
         pf_last_error = PF_STATUS_NO_MEMORY;
         return NULL;

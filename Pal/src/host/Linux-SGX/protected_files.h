@@ -381,36 +381,16 @@ typedef enum {
 #define FULLNAME_MAX_LEN      (PATHNAME_MAX_LEN + FILENAME_MAX_LEN)
 #define RECOVERY_FILE_MAX_LEN (FULLNAME_MAX_LEN + 10)
 
-DEFINE_LIST(_file_mht_node);
-typedef struct _file_mht_node {
-    LIST_TYPE(_file_mht_node) list;
-    /* these are exactly the same as file_data_node_t below, any change should apply to both
-       (both are saved in the cache as void*) */
-    uint8_t type;
-    uint64_t mht_node_number;
-    struct _file_mht_node* parent;
-    bool need_writing;
-    bool new_node;
-    union {
-        struct {
-            uint64_t physical_node_number;
-            encrypted_node_t encrypted; // the actual data from the disk
-        };
-        recovery_node_t recovery_node;
-    };
-    /* from here the structures are different */
-    mht_node_t plain; // decrypted data
-} file_mht_node_t;
-DEFINE_LISTP(_file_mht_node);
+// make sure these are the same size
+static_assert(sizeof(mht_node_t) == sizeof(data_node_t),
+              "sizeof(mht_node_t) == sizeof(data_node_t)");
 
-DEFINE_LIST(_file_data_node);
-typedef struct _file_data_node {
-    LIST_TYPE(_file_data_node) list;
-    /* these are exactly the same as file_mht_node_t above, any change should apply to both
-       (both are saved in the cache as void*) */
+DEFINE_LIST(_file_node);
+typedef struct _file_node {
+    LIST_TYPE(_file_node) list;
     uint8_t type;
-    uint64_t data_node_number;
-    file_mht_node_t* parent;
+    uint64_t node_number;
+    struct _file_node* parent;
     bool need_writing;
     bool new_node;
     union {
@@ -420,10 +400,12 @@ typedef struct _file_data_node {
         };
         recovery_node_t recovery_node;
     };
-    /* from here the structures are different */
-    data_node_t plain; // decrypted data
-} file_data_node_t;
-DEFINE_LISTP(_file_data_node);
+    union { // decrypted data
+        mht_node_t mht_plain;
+        data_node_t data_plain;
+    };
+} file_node_t;
+DEFINE_LISTP(_file_node);
 
 extern pf_status_t pf_last_error; // last operation error
 
@@ -439,7 +421,7 @@ typedef struct _ipf_context {
     };
 
     meta_data_encrypted_t encrypted_part_plain; // encrypted part of meta data node, decrypted
-    file_mht_node_t root_mht; // the root of the mht is always needed (for files bigger than 3KB)
+    file_node_t root_mht; // the root of the mht is always needed (for files bigger than 3KB)
     pf_handle_t file; // TODO: rename to handle
     pf_file_mode_t mode;
     int64_t offset; // current file position (user's view)
@@ -478,12 +460,12 @@ bool ipf_derive_random_node_key(pf_context_t pf, uint64_t physical_node_number);
 bool ipf_generate_random_meta_data_key(pf_context_t pf);
 bool ipf_restore_current_meta_data_key(pf_context_t pf);
 
-file_data_node_t* ipf_get_data_node(pf_context_t pf);
-file_data_node_t* ipf_read_data_node(pf_context_t pf);
-file_data_node_t* ipf_append_data_node(pf_context_t pf);
-file_mht_node_t* ipf_get_mht_node(pf_context_t pf);
-file_mht_node_t* ipf_read_mht_node(pf_context_t pf, uint64_t mht_node_number);
-file_mht_node_t* ipf_append_mht_node(pf_context_t pf, uint64_t mht_node_number);
+file_node_t* ipf_get_data_node(pf_context_t pf);
+file_node_t* ipf_read_data_node(pf_context_t pf);
+file_node_t* ipf_append_data_node(pf_context_t pf);
+file_node_t* ipf_get_mht_node(pf_context_t pf);
+file_node_t* ipf_read_mht_node(pf_context_t pf, uint64_t mht_node_number);
+file_node_t* ipf_append_mht_node(pf_context_t pf, uint64_t mht_node_number);
 bool ipf_write_recovery_file(pf_context_t pf);
 bool ipf_set_update_flag(pf_context_t pf, bool flush_to_disk);
 void ipf_clear_update_flag(pf_context_t pf);
