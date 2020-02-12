@@ -413,8 +413,8 @@ int pf_encrypt_file(const char* input_path, const char* output_path, const pf_ke
 
         while (input_offset < input_size) {
             chunk_size = input_size - input_offset;
-            if (chunk_size > NODE_SIZE)
-                chunk_size = NODE_SIZE;
+            if (chunk_size > PF_NODE_SIZE)
+                chunk_size = PF_NODE_SIZE;
             pfs = pf_write(pf, input_offset, chunk_size, (uint8_t*)input_mem + input_offset);
             if (PF_FAILURE(pfs)) {
                 ERROR("Failed to write to output PF: %d\n", pfs);
@@ -493,7 +493,7 @@ int pf_decrypt_file(const char* input_path, const char* output_path, bool verify
         }
     }*/
 
-    buffer = malloc(NODE_SIZE);
+    buffer = malloc(PF_NODE_SIZE);
     if (!buffer) {
         ERROR("No memory\n");
         goto out;
@@ -502,7 +502,7 @@ int pf_decrypt_file(const char* input_path, const char* output_path, bool verify
     /* Process file contents */
     uint64_t input_size;
     uint64_t input_offset    = 0;
-    uint32_t chunk_data_size = NODE_SIZE;
+    uint32_t chunk_data_size = PF_NODE_SIZE;
 
     pfs = pf_get_size(pf, &input_size);
     if (PF_FAILURE(pfs)) {

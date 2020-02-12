@@ -16,6 +16,7 @@
    You should have received a copy of the GNU Lesser General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
+#include <linux/fs.h>
 #include <pal_linux.h>
 #include <pal_linux_error.h>
 #include <pal_internal.h>

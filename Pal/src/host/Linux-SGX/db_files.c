@@ -564,7 +564,11 @@ static int pf_file_attrquery(struct protected_file* pf, int fd, const char* path
     assert(PF_SUCCESS(pfs));
     attr->pending_size = size;
 
-    if (fd == *(int*)pf->context->file) { /* this is a PF opened just for us, close it */
+    pf_handle_t pf_handle;
+    pfs = pf_get_handle(pf->context, &pf_handle);
+    assert(PF_SUCCESS(pfs));
+
+    if (fd == *(int*)pf_handle) { /* this is a PF opened just for us, close it */
         pfs = pf_close(pf->context);
         pf->context = NULL;
         assert(PF_SUCCESS(pfs));
