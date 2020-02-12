@@ -113,7 +113,8 @@ static pf_status_t cb_flush(pf_handle_t handle) {
     return PF_STATUS_SUCCESS;
 }
 
-static pf_status_t cb_open(const char* path, pf_file_mode_t mode, pf_handle_t* handle, size_t* size) {
+static pf_status_t cb_open(const char* path, pf_file_mode_t mode, pf_handle_t* handle,
+                           size_t* size) {
     // TODO (only used for recovery files)
     __UNUSED(path);
     __UNUSED(mode);
@@ -165,7 +166,8 @@ static pf_status_t cb_crypto_aes_gcm_decrypt(const pf_key_t* key, const pf_iv_t*
                                              const void* input, size_t input_size, void* output,
                                              const pf_mac_t* mac) {
     int ret = lib_AESGCMDecrypt((const uint8_t*)key, sizeof(*key), (const uint8_t*)iv, input,
-                                input_size, aad, aad_size, output, (const uint8_t*)mac, sizeof(*mac));
+                                input_size, aad, aad_size, output, (const uint8_t*)mac,
+                                sizeof(*mac));
     if (ret != 0) {
         SGX_DBG(DBG_E, "lib_AESGCMDecrypt failed: %d\n", ret);
         return PF_STATUS_CALLBACK_FAILED;
@@ -454,7 +456,8 @@ static int register_protected_files(const char* key_prefix) {
             len = get_config(pal_state.root_config, key, uri, CONFIG_MAX);
             if (len > 0) {
                 if (!strstartswith_static(uri, FILE_URI_PREFIX)) {
-                    SGX_DBG(DBG_E, "Invalid URI [%s]: Protected files must start with 'file:'\n", uri);
+                    SGX_DBG(DBG_E, "Invalid URI [%s]: Protected files must start with 'file:'\n",
+                            uri);
                 } else {
                     register_protected_path(uri, NULL);
                 }

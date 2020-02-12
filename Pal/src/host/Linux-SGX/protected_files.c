@@ -188,7 +188,7 @@ typedef struct {
 } kdf_input_t;
 
 static bool ipf_generate_secure_blob(pf_context_t pf, pf_key_t* key, const char* label,
-                              uint64_t physical_node_number, pf_mac_t* output) {
+                                     uint64_t physical_node_number, pf_mac_t* output) {
     kdf_input_t buf = {0};
 
     DEBUG_PF("label: %s, node: %lu\n", label, physical_node_number);
@@ -1498,7 +1498,8 @@ static size_t ipf_read(pf_context_t pf, void* ptr, size_t size) {
 // this is a very 'specific' function, tied to the architecture of the file layout,
 // returning the node numbers according to the offset in the file
 static void get_node_numbers(uint64_t offset, uint64_t* mht_node_number, uint64_t* data_node_number,
-                      uint64_t* physical_mht_node_number, uint64_t* physical_data_node_number) {
+                             uint64_t* physical_mht_node_number,
+                             uint64_t* physical_data_node_number) {
     // node 0 - meta data node
     // node 1 - mht
     // nodes 2-97 - data (ATTACHED_DATA_NODES_COUNT == 96)

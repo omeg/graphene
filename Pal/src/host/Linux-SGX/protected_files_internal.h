@@ -193,12 +193,12 @@ struct pf_context {
 
     meta_data_encrypted_t encrypted_part_plain; // encrypted part of meta data node, decrypted
     file_node_t root_mht; // the root of the mht is always needed (for files bigger than 3KB)
-    pf_handle_t file; // TODO: rename to handle
+    pf_handle_t file;
     pf_file_mode_t mode;
     int64_t offset; // current file position (user's view)
-    bool end_of_file; // flag
+    bool end_of_file;
     size_t real_file_size;
-    bool need_writing; // flag
+    bool need_writing;
     pf_status_t file_status;
     pf_key_t user_kdk_key;
     pf_key_t cur_key;
@@ -206,7 +206,7 @@ struct pf_context {
     uint32_t master_key_count;
     char recovery_filename[RECOVERY_FILE_MAX_LEN]; // might include full path to the file
     lruc_context_t cache;
-    char* debug_buffer; //!< Buffer for debug output
+    char* debug_buffer; // buffer for debug output
 };
 
 static bool ipf_init_fields(pf_context_t pf);
