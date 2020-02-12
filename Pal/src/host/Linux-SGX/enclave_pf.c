@@ -21,6 +21,7 @@
 #include <pal_linux_error.h>
 #include <pal_internal.h>
 #include <pal_crypto.h>
+#include <spinlock.h>
 
 /*
 At startup, protected file paths are read from the manifest and the specified files
@@ -187,7 +188,7 @@ static pf_key_t g_pf_wrap_key = {0};
 
 static LISTP_TYPE(protected_file) protected_file_list = LISTP_INIT;
 static LISTP_TYPE(protected_file) protected_dir_list = LISTP_INIT;
-static struct spinlock protected_file_lock = LOCK_INIT;
+static spinlock_t protected_file_lock = INIT_SPINLOCK_UNLOCKED;
 
 #define FILE_URI_PREFIX "file:"
 #define FILE_URI_PREFIX_LEN strlen(FILE_URI_PREFIX)
@@ -198,7 +199,7 @@ struct protected_file* find_protected_file(const char* path) {
     struct protected_file* tmp = NULL;
     size_t len                 = strlen(path);
 
-    _DkSpinLock(&protected_file_lock);
+    spinlock_lock(&protected_file_lock);
     LISTP_FOR_EACH_ENTRY(tmp, &protected_file_list, list) {
         /* files: must be exactly the same URI */
         if (tmp->path_len == len && !memcmp(tmp->path, path, len + 1)) {
@@ -207,7 +208,7 @@ struct protected_file* find_protected_file(const char* path) {
         }
     }
 
-    _DkSpinUnlock(&protected_file_lock);
+    spinlock_unlock(&protected_file_lock);
     return pf;
 }
 
@@ -217,7 +218,7 @@ struct protected_file* find_protected_dir(const char* path) {
     struct protected_file* tmp = NULL;
     size_t len                 = strlen(path);
 
-    _DkSpinLock(&protected_file_lock);
+    spinlock_lock(&protected_file_lock);
     LISTP_FOR_EACH_ENTRY(tmp, &protected_dir_list, list) {
         if (tmp->path_len < len &&
             !memcmp(tmp->path, path, tmp->path_len) &&
@@ -227,7 +228,7 @@ struct protected_file* find_protected_dir(const char* path) {
         }
     }
 
-    _DkSpinUnlock(&protected_file_lock);
+    spinlock_unlock(&protected_file_lock);
     return pf;
 }
 
@@ -413,7 +414,7 @@ static int register_protected_path(const char* path, struct protected_file** new
     if (is_dir)
         register_protected_dir(path);
 
-    _DkSpinLock(&protected_file_lock);
+    spinlock_lock(&protected_file_lock);
 
     if (is_dir) {
         LISTP_ADD_TAIL(new, &protected_dir_list, list);
@@ -421,7 +422,7 @@ static int register_protected_path(const char* path, struct protected_file** new
         LISTP_ADD_TAIL(new, &protected_file_list, list);
     }
 
-    _DkSpinUnlock(&protected_file_lock);
+    spinlock_unlock(&protected_file_lock);
 
     if (new_pf)
         *new_pf = new;
