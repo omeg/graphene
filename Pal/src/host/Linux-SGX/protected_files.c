@@ -47,39 +47,30 @@
  *
  */
 
-#define __STDC_WANT_LIB_EXT1__ 1
 #include <linux/fs.h>
-#include <stdlib.h>
-#include <string.h>
 #include "protected_files_internal.h"
 
-size_t strnlen(const char *str, size_t maxlen);
-
 #ifdef IN_PAL
-int snprintf(char* buf, int n, const char* fmt, ...) __attribute__((format(printf, 3, 4)));
-#else
-#include <stdio.h>
-#endif
-
-void erase_memory(void *buffer, size_t size) {
-#ifdef __STDC_LIB_EXT1__
-    memset_s(buffer, size, 0, size);
-#else
-    volatile unsigned char *p = buffer;
-    while (size--) {
-        *p++ = 0;
-    }
-#endif
-}
-
+#include <api.h>
 char* strncpy(char* dest, const char* src, size_t size) {
     size_t src_len = strlen(src) + 1;
     size_t len = src_len < size ? src_len : size;
     memcpy(dest, src, len);
     return dest;
 }
+#else
+#include <stdio.h>
+#include <string.h>
+#endif
 
-/* Host callbacks (from ITL's implementation) */
+void erase_memory(void *buffer, size_t size) {
+    volatile unsigned char *p = buffer;
+    while (size--) {
+        *p++ = 0;
+    }
+}
+
+/* Host callbacks */
 static pf_malloc_f   cb_malloc   = NULL;
 static pf_free_f     cb_free     = NULL;
 static pf_read_f     cb_read     = NULL;
@@ -179,36 +170,23 @@ pf_status_t pf_last_error;
 
 // global/util
 
-static inline bool consttime_memequal(const void* a, const void* b, size_t size) {
-    uint32_t x = 0;
+int consttime_memequal(const void *b1, const void *b2, size_t len) {
+    const unsigned char *c1 = b1, *c2 = b2;
+    unsigned int res = 0;
 
-    const uint8_t* a1 = (const uint8_t*)a;
-    const uint8_t* b1 = (const uint8_t*)b;
+    while (len--)
+        res |= *c1++ ^ *c2++;
 
-    while (size--)
-        x |= *a1++ ^ *b1++;
-
-    // TODO: fix this
-#if 0
-    __asm(
-    "movq   %3, %%rcx\n"
-    "xorl   %0, %0\n"
-    "jmp    2f\n"
-"1:\n"
-    "movzbl (%1, %%rcx), %%edx\n"
-    "movzbl (%2, %%rcx), %%eax\n"
-    "xorl   %%edx, %%eax\n"
-    "orl    %%eax, %0\n"
-"2:\n"
-    "decq   %%rcx\n"
-    "jns    1b\n"
-
-    :"=r"(x) /* x = %0 */
-    :"r"(a), "r"(b), "g"(size) /* a = %1, b = %2, size = %3 */
-    :"%rax", "%rcx", "%rdx"
-    );
-#endif
-    return x == 0;
+    /*
+     * Map 0 to 1 and [1, 256) to 0 using only constant-time
+     * arithmetic.
+     *
+     * This is not simply `!res' because although many CPUs support
+     * branchless conditional moves and many compilers will take
+     * advantage of them, certain compilers generate branches on
+     * certain CPUs for `!res'.
+     */
+    return (1 & ((res - 1) >> 8));
 }
 
 // file_version.cpp
