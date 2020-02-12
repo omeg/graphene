@@ -153,16 +153,19 @@ void pf_set_crypto_callbacks(pf_crypto_aes_gcm_encrypt_f crypto_aes_gcm_encrypt_
     cb_crypto_random = crypto_random_f;
 }
 
-pf_status_t check_callbacks() {
+bool check_callbacks() {
     return (cb_malloc != NULL &&
             cb_free != NULL &&
             cb_read != NULL &&
             cb_write != NULL &&
             cb_truncate != NULL &&
             cb_flush != NULL &&
+            cb_open != NULL &&
+            cb_close != NULL &&
+            cb_delete != NULL &&
             cb_crypto_aes_gcm_encrypt != NULL &&
             cb_crypto_aes_gcm_decrypt != NULL &&
-            cb_crypto_random != NULL) ? PF_STATUS_SUCCESS : PF_STATUS_UNINITIALIZED;
+            cb_crypto_random != NULL);
 }
 
 static pf_iv_t empty_iv = {0};
@@ -1921,6 +1924,9 @@ bool ipf_do_file_recovery(pf_context_t pf, const char* filename, uint32_t node_s
 pf_status_t pf_open(pf_handle_t handle, const char* path, size_t underlying_size,
                     pf_file_mode_t mode, bool create, bool enable_recovery, const pf_key_t* key,
                     pf_context_t* context) {
+    if (!check_callbacks())
+        return PF_STATUS_UNINITIALIZED;
+
     *context = ipf_open(path, mode, create, handle, underlying_size, key, enable_recovery);
     if (*context)
         return PF_STATUS_SUCCESS;
@@ -1928,18 +1934,27 @@ pf_status_t pf_open(pf_handle_t handle, const char* path, size_t underlying_size
 }
 
 pf_status_t pf_close(pf_context_t pf) {
+    if (!check_callbacks())
+        return PF_STATUS_UNINITIALIZED;
+
     if (ipf_close(pf))
         return PF_STATUS_SUCCESS;
     return pf_last_error;
 }
 
 pf_status_t pf_get_size(pf_context_t pf, size_t* size) {
+    if (!check_callbacks())
+        return PF_STATUS_UNINITIALIZED;
+
     *size = pf->encrypted_part_plain.size;
     return PF_STATUS_SUCCESS;
 }
 
 // TODO: file truncation
 pf_status_t pf_set_size(pf_context_t pf, size_t size) {
+    if (!check_callbacks())
+        return PF_STATUS_UNINITIALIZED;
+
     // this file format uses int64 for size
     if (size > INT64_MAX)
         return PF_STATUS_INVALID_PARAMETER;
@@ -1956,6 +1971,7 @@ pf_status_t pf_set_size(pf_context_t pf, size_t size) {
         DEBUG_PF("extending the file from %lu to %lu\n", pf->offset, size);
         if (ipf_write(pf, NULL, size - pf->offset) != size - pf->offset)
             return pf_last_error;
+
         pf->offset = size;
         return PF_STATUS_SUCCESS;
     }
@@ -1964,22 +1980,33 @@ pf_status_t pf_set_size(pf_context_t pf, size_t size) {
 }
 
 pf_status_t pf_read(pf_context_t pf, uint64_t offset, size_t size, void* output) {
+    if (!check_callbacks())
+        return PF_STATUS_UNINITIALIZED;
+
     if (!ipf_seek(pf, offset, SEEK_SET))
         return pf_last_error;
+
     if (ipf_read(pf, output, size) != size)
         return pf_last_error;
     return PF_STATUS_SUCCESS;
 }
 
 pf_status_t pf_write(pf_context_t pf, uint64_t offset, size_t size, const void* input) {
+    if (!check_callbacks())
+        return PF_STATUS_UNINITIALIZED;
+
     if (!ipf_seek(pf, offset, SEEK_SET))
         return pf_last_error;
+
     if (ipf_write(pf, input, size) != size)
         return pf_last_error;
     return PF_STATUS_SUCCESS;
 }
 
 pf_status_t pf_get_handle(pf_context_t pf, pf_handle_t* handle) {
+    if (!check_callbacks())
+        return PF_STATUS_UNINITIALIZED;
+
     *handle = pf->file;
     return PF_STATUS_SUCCESS;
 }
